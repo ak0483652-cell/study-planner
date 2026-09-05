@@ -911,8 +911,23 @@ Rules:
     answer = await gemini_text(prompt)
 
     if not answer:
+        for fallback_model in ["gemini-3.8-flash", "gemini-3.5-flash"]:
+            if fallback_model == MODEL:
+                continue
+            try:
+                response = client.models.generate_content(model=fallback_model, contents=prompt)
+                if response and response.text:
+                    answer = response.text.strip()
+                    break
+            except Exception:
+                logger.error("Roadmap fallback failed", exc_info=True)
+
+    if not answer:
         await update.message.reply_text(
-            "⚠️ Roadmap generate nahi ho paaya. Please dobara try karo."
+            "⚠️ Roadmap generate nahi ho paaya.
+
+"
+            "API/model response nahi mila. `/start` se dobara Topper Mode try karo."
         )
         return
 
