@@ -1,9 +1,9 @@
 import os
 import json
 import logging
+from datetime import datetime, date
 
 from dotenv import load_dotenv
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -14,7 +14,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-
 from google import genai
 from google.genai import types
 
@@ -28,6 +27,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Keep the model that was already working in your project.
 MODEL = "gemini-3.6-flash"
 
 if not BOT_TOKEN:
@@ -36,124 +36,126 @@ if not BOT_TOKEN:
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY missing in .env")
 
-
 client = genai.Client(api_key=GEMINI_API_KEY)
-
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# USER DATA
+# IN-MEMORY USER DATA
 # =========================================================
 
-progress = {}
+users = {}
 poll_data = {}
 
 
 def get_user(user_id):
-
-    if user_id not in progress:
-
-        progress[user_id] = {
+    if user_id not in users:
+        users[user_id] = {
             "xp": 0,
             "streak": 0,
+            "last_mission": None,
             "quizzes": 0,
             "questions": 0,
             "correct": 0,
             "topics": {},
         }
-
-    return progress[user_id]
-
-
-# =========================================================
-# MAIN MENU
-# =========================================================
-
-def main_keyboard():
-
-    keyboard = [
-
-        [
-            InlineKeyboardButton(
-                "💡 Doubt Buddy",
-                callback_data="ask"
-            ),
-            InlineKeyboardButton(
-                "📸 Snap & Solve",
-                callback_data="photo"
-            ),
-        ],
-
-        [
-            InlineKeyboardButton(
-                "📚 Study Corner",
-                callback_data="search"
-            ),
-            InlineKeyboardButton(
-                "🎯 Quick Quiz",
-                callback_data="quiz"
-            ),
-        ],
-
-        [
-            InlineKeyboardButton(
-                "🔥 Topper Mode",
-                callback_data="topper"
-            ),
-            InlineKeyboardButton(
-                "📊 My Progress",
-                callback_data="progress"
-            ),
-        ],
-
-        [
-            InlineKeyboardButton(
-                "⚡ Practice More",
-                callback_data="weak"
-            )
-        ],
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
+    return users[user_id]
 
 
 # =========================================================
-# GEMINI HELPER
+# COMMON HELPERS
 # =========================================================
 
-async def ask_gemini(prompt):
+def clear_mode(context):
+    for key in [
+        "mode",
+        "study_topic",
+        "difficulty",
+        "current_question",
+        "quiz_topic",
+        "quiz_questions",
+        "quiz_index",
+        "quiz_score",
+        "quiz_user_id",
+        "roadmap_step",
+        "roadmap",
+        "generated_roadmap",
+    ]:
+        context.user_data.pop(key, None)
 
+
+def menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💡 Doubt Buddy", callback_data="doubt"),
+            InlineKeyboardButton("📸 Snap & Solve", callback_data="snap"),
+        ],
+        [
+            InlineKeyboardButton("📚 Study Corner", callback_data="study"),
+            InlineKeyboardButton("🎯 Quick Quiz", callback_data="quiz"),
+        ],
+        [
+            InlineKeyboardButton("🔥 Topper Mode", callback_data="topper"),
+            InlineKeyboardButton("📊 My Progress", callback_data="progress"),
+        ],
+        [
+            InlineKeyboardButton("⚡ Practice More", callback_data="weak"),
+        ],
+    ])
+
+
+async def gemini_text(prompt):
     try:
-
         response = client.models.generate_content(
             model=MODEL,
             contents=prompt,
         )
-
         if response and response.text:
-
             return response.text.strip()
-
-        return "⚠️ Answer generate nahi ho paaya."
-
+        return None
     except Exception as e:
+        logger.error("Gemini text error", exc_info=True)
+        return None
 
-        logger.error(
-            f"Gemini Error: {e}",
-            exc_info=True
-        )
 
-        return (
-            "⚠️ Abhi answer generate nahi ho pa raha.\n"
-            "Thodi der baad dobara try karo."
-        )
+def parse_json_response(text):
+    if not text:
+        return None
+
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                pass
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except Exception:
+                pass
+
+    return None
 
 
 # =========================================================
@@ -161,32 +163,20 @@ async def ask_gemini(prompt):
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user_id = update.effective_user.id
-
-    get_user(user_id)
-
-    context.user_data.clear()
-
-    text = (
-        "👋 Hey! Welcome to Study Help Bot 📚\n\n"
-
-        "Padhai ko simple aur interesting banane ke liye "
-        "main tumhari help karunga! 🚀\n\n"
-
-        "💡 Doubts solve karo\n"
-        "📸 Photo se questions solve karo\n"
-        "🎯 Quiz khelo\n"
-        "📊 Progress check karo\n"
-        "⚡ Weak topics practice karo\n"
-        "🔥 Topper Mode use karo\n\n"
-
-        "Neeche se option choose karo 👇"
-    )
+    clear_mode(context)
+    user = get_user(update.effective_user.id)
 
     await update.message.reply_text(
-        text,
-        reply_markup=main_keyboard()
+        "👋 Hey! Welcome to Study Help Bot 📚\n\n"
+        "Tum yahan:\n"
+        "💡 Doubts solve kar sakte ho\n"
+        "📸 Photo se questions solve kara sakte ho\n"
+        "📚 Easy/Hard practice kar sakte ho\n"
+        "🎯 Quizzes khel sakte ho\n"
+        "🔥 Personal study roadmap bana sakte ho\n"
+        "📊 Apni progress track kar sakte ho\n\n"
+        "Choose an option 👇",
+        reply_markup=menu_keyboard(),
     )
 
 
@@ -194,66 +184,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # DOUBT BUDDY
 # =========================================================
 
-async def solve_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_doubt(update, context):
+    context.user_data["mode"] = "doubt"
 
+    await update.message.reply_text(
+        "💡 DOUBT BUDDY\n\n"
+        "Apna question bhejo 👇\n\n"
+        "Examples:\n"
+        "• Explain Newton's Second Law\n"
+        "• Solve x² + 5x + 6 = 0\n"
+        "• Explain photosynthesis in easy words"
+    )
+
+
+async def solve_doubt(update, context):
     question = update.message.text.strip()
-
     if not question:
         return
 
-    context.user_data["waiting_for_doubt"] = False
+    context.user_data["mode"] = None
 
-    await update.message.reply_text(
-        "🧠 Question samajh raha hoon..."
-    )
+    await update.message.reply_text("🧠 Question samajh raha hoon...")
 
     prompt = f"""
-You are a friendly study tutor.
+You are an expert but friendly personal study tutor.
 
-Student's question:
-
+Student question:
 {question}
 
 Answer in simple Hinglish.
 
-Rules:
+Give:
+📌 Concept
+🧠 Easy Explanation
+📝 Step-by-step Solution
+✅ Final Answer
+🎯 Exam Tip
 
-1. Explain step-by-step.
-2. Use very easy language.
-3. For Maths show calculations.
-4. For Physics show formula and values.
-5. For Chemistry explain concepts/reactions clearly.
-6. Give examples when useful.
-7. Make it useful for exams.
-8. Give final answer clearly.
-9. Do not use complicated language.
-10. Do not mention that you are an AI.
+Rules:
+- Do not skip important calculation steps.
+- For Maths show the working.
+- For Physics show formula, substitution and units.
+- For Chemistry show relevant equations/reactions.
+- For theory subjects use simple examples.
+- If the question has multiple parts, answer every part.
+- Do not invent missing information.
+- Do not mention that you are an AI.
 """
 
-    answer = await ask_gemini(prompt)
+    answer = await gemini_text(prompt)
+
+    if not answer:
+        await update.message.reply_text(
+            "⚠️ Answer generate nahi ho paaya. Question dobara bhejo."
+        )
+        return
 
     await update.message.reply_text(answer)
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "💡 Ask Another Doubt",
-                    callback_data="ask"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🏠 Main Menu",
-                    callback_data="home"
-                )
-            ],
-        ]
-    )
-
     await update.message.reply_text(
-        "Aur kuch puchna hai? 👇",
-        reply_markup=keyboard
+        "Aur doubt hai? 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💡 Ask Another", callback_data="doubt")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="home")],
+        ]),
     )
 
 
@@ -262,114 +255,92 @@ Rules:
 # =========================================================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     try:
-
         await update.message.reply_text(
-            "📸 Photo mil gayi!\n\n"
+            "📸 Photo received!\n\n"
             "🔍 Question read kar raha hoon..."
         )
 
-        # Get highest quality Telegram photo
+        # Highest resolution photo from Telegram.
         photo = update.message.photo[-1]
 
-        # Download from Telegram
-        telegram_file = await context.bot.get_file(
-            photo.file_id
-        )
-
+        telegram_file = await context.bot.get_file(photo.file_id)
         image_bytes = await telegram_file.download_as_bytearray()
 
-        # Convert image for Gemini
+        if not image_bytes:
+            raise ValueError("Telegram returned an empty image.")
+
+        # Use Gemini's native image Part instead of manually constructing
+        # a REST payload. This is more reliable with google-genai.
         image_part = types.Part.from_bytes(
             data=bytes(image_bytes),
-            mime_type="image/jpeg"
+            mime_type="image/jpeg",
         )
 
         prompt = """
-You are a friendly study tutor.
+You are an expert visual study tutor.
 
-Look carefully at the image.
+Look carefully at the attached image.
 
-Identify the question and solve it.
+Read every visible part of the question and solve it.
 
 IMPORTANT:
-
-1. Read the question carefully.
+1. Identify the exact question before solving.
 2. If there are multiple questions, solve them one by one.
-3. Explain every step.
-4. For Maths show calculations.
-5. For Physics show formula, substitution and answer.
-6. For Chemistry explain reactions and concepts.
-7. Use simple Hinglish.
-8. Give the final answer clearly.
-9. If the image is genuinely unclear, tell the student exactly what is unclear.
+3. Do not give only the final answer.
+4. Maths: show formulas and every important calculation.
+5. Physics: show formula, known values, substitution, units and result.
+6. Chemistry: show equations/reactions and explain the concept.
+7. Other subjects: explain clearly with relevant examples.
+8. Use simple Hinglish.
+9. If the image is genuinely unreadable, say exactly which part is unclear.
+10. Never claim the image is unreadable if the text can actually be read.
 
-Use this format:
+Format:
 
-📌 Question:
-[question]
+📌 QUESTION
+[read the question]
 
-🧠 Solution:
-[step-by-step solution]
+🧠 CONCEPT
+[concept]
 
-✅ Final Answer:
+📝 STEP-BY-STEP SOLUTION
+[complete solution]
+
+✅ FINAL ANSWER
 [final answer]
+
+🎯 QUICK TIP
+[short exam tip]
 """
 
         response = client.models.generate_content(
             model=MODEL,
-            contents=[
-                prompt,
-                image_part
-            ]
+            contents=[prompt, image_part],
         )
 
-        if response and response.text:
-
+        if not response or not response.text:
             await update.message.reply_text(
-                response.text
+                "⚠️ Image se answer generate nahi ho paaya.\n"
+                "Please clear, straight photo bhejo."
             )
+            return
 
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "📸 Solve Another",
-                            callback_data="photo"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🏠 Main Menu",
-                            callback_data="home"
-                        )
-                    ],
-                ]
-            )
-
-            await update.message.reply_text(
-                "Aur question solve karna hai? 👇",
-                reply_markup=keyboard
-            )
-
-        else:
-
-            await update.message.reply_text(
-                "⚠️ Question image se read nahi ho paaya.\n"
-                "Please clear photo bhejo."
-            )
-
-    except Exception as e:
-
-        logger.error(
-            f"PHOTO SOLVER ERROR: {e}",
-            exc_info=True
-        )
+        await update.message.reply_text(response.text)
 
         await update.message.reply_text(
-            "❌ Photo solve karte time problem aa gayi.\n\n"
-            "Clear photo bhejkar dobara try karo."
+            "📸 Another question?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📸 Solve Another", callback_data="snap")],
+                [InlineKeyboardButton("🏠 Main Menu", callback_data="home")],
+            ]),
+        )
+
+    except Exception as e:
+        logger.error("SNAP & SOLVE ERROR", exc_info=True)
+        await update.message.reply_text(
+            "❌ Snap & Solve me error aa gaya.\n\n"
+            "Please clear photo bhejo aur dobara try karo."
         )
 
 
@@ -377,166 +348,279 @@ Use this format:
 # STUDY CORNER
 # =========================================================
 
-async def study_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_study(update, context):
+    context.user_data["mode"] = "study_topic"
 
+    await update.message.reply_text(
+        "📚 STUDY CORNER\n\n"
+        "Kis topic ki practice karni hai?\n\n"
+        "Examples:\n"
+        "• Newton's Laws\n"
+        "• Quadratic Equations\n"
+        "• Thermodynamics\n"
+        "• Organic Chemistry\n\n"
+        "Topic type karke bhejo 👇"
+    )
+
+
+async def study_topic_received(update, context):
     topic = update.message.text.strip()
 
     if not topic:
         return
 
-    context.user_data["waiting_for_search"] = False
+    context.user_data["study_topic"] = topic
+    context.user_data["mode"] = "study_difficulty"
 
     await update.message.reply_text(
-        "📚 Topic prepare kar raha hoon..."
+        f"📚 Topic: {topic}\n\n"
+        "Ab difficulty choose karo 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🟢 Easy", callback_data="study_easy"),
+                InlineKeyboardButton("🔴 Hard", callback_data="study_hard"),
+            ],
+            [
+                InlineKeyboardButton("🏠 Main Menu", callback_data="home")
+            ],
+        ]),
     )
 
+
+def generate_practice_question(topic, difficulty):
     prompt = f"""
-You are a friendly study tutor.
+Create ONE high-quality practice question for a student.
 
-Topic:
+Topic: {topic}
+Difficulty: {difficulty}
 
-{topic}
+Return ONLY valid JSON:
 
-Explain this topic to a student in simple Hinglish.
+{{
+  "question": "The question",
+  "answer": "The correct final answer",
+  "solution": "A complete step-by-step solution",
+  "concept": "The concept being tested",
+  "hint": "A useful hint without giving away the answer"
+}}
 
-Give:
-
-1. Simple definition
-2. Important concepts
-3. Key points
-4. Example
-5. Exam-focused points
-6. 3 quick revision questions
-
-Keep it easy to understand.
+Requirements:
+- The question must be unambiguous and solvable.
+- Difficulty must genuinely match {difficulty}.
+- The official solution must actually solve the exact question.
+- For numerical questions, verify the arithmetic.
+- Do not use markdown outside JSON.
 """
 
-    answer = await ask_gemini(prompt)
+    result = gemini_text(prompt)
+    return parse_json_response(result)
 
-    await update.message.reply_text(answer)
+
+async def send_practice_question(update, context):
+    topic = context.user_data.get("study_topic")
+    difficulty = context.user_data.get("difficulty")
 
     await update.message.reply_text(
-        "📚 Study Corner complete!",
-        reply_markup=main_keyboard()
+        f"🧠 Generating a {difficulty.lower()} question..."
+    )
+
+    question = generate_practice_question(topic, difficulty)
+
+    if not isinstance(question, dict):
+        await update.message.reply_text(
+            "⚠️ Question generate nahi ho paaya. Dobara try karo."
+        )
+        return
+
+    required = ["question", "answer", "solution", "concept", "hint"]
+    if not all(key in question for key in required):
+        await update.message.reply_text(
+            "⚠️ Question format incomplete tha. Dobara try karo."
+        )
+        return
+
+    context.user_data["current_question"] = question
+    context.user_data["mode"] = "study_answer"
+
+    await update.message.reply_text(
+        f"{'🟢 EASY' if difficulty == 'Easy' else '🔴 HARD'} QUESTION\n\n"
+        f"📚 {topic}\n\n"
+        f"{question['question']}\n\n"
+        "✍️ Apna answer bhejo.\n"
+        "💡 Hint ke liye `hint` likho."
+    )
+
+
+async def show_hint(update, context):
+    question = context.user_data.get("current_question")
+
+    if not question:
+        await update.message.reply_text("Pehle ek practice question start karo.")
+        return
+
+    await update.message.reply_text(
+        "💡 HINT\n\n" + str(question["hint"])
+    )
+
+
+async def check_practice_answer(update, context):
+    student_answer = update.message.text.strip()
+    question = context.user_data.get("current_question")
+
+    if not question:
+        await update.message.reply_text(
+            "Pehle Study Corner se question start karo."
+        )
+        return
+
+    if student_answer.lower() in {"hint", "help", "h"}:
+        await show_hint(update, context)
+        return
+
+    await update.message.reply_text("🔎 Tumhara answer check kar raha hoon...")
+
+    prompt = f"""
+You are an exacting but friendly teacher checking a student's answer.
+
+QUESTION:
+{question["question"]}
+
+CORRECT ANSWER:
+{question["answer"]}
+
+OFFICIAL SOLUTION:
+{question["solution"]}
+
+CONCEPT:
+{question["concept"]}
+
+STUDENT ANSWER:
+{student_answer}
+
+Compare the student's answer with the official answer.
+
+Give:
+1. 🟢 Correct / 🟡 Partially Correct / 🔴 Incorrect
+2. What the student did right.
+3. What is wrong or missing.
+4. The REAL correct solution, step by step.
+5. ✅ Final answer.
+6. 🎯 One exam tip.
+
+Do not blindly mark it correct.
+For numerical answers, allow reasonable equivalent forms/rounding.
+Use simple Hinglish.
+"""
+
+    result = gemini_text(prompt)
+
+    if not result:
+        await update.message.reply_text(
+            "⚠️ Answer check nahi ho paaya. Dobara bhejo."
+        )
+        return
+
+    user = get_user(update.effective_user.id)
+    user["questions"] += 1
+
+    # Track practice as a topic attempt. The evaluator remains the source
+    # of truth for correctness; exact automated parsing is intentionally avoided.
+    topic_stats = user["topics"].setdefault(
+        context.user_data.get("study_topic", "General"),
+        {"correct": 0, "total": 0},
+    )
+    topic_stats["total"] += 1
+
+    await update.message.reply_text(result)
+
+    await update.message.reply_text(
+        "Next kya karna hai? 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➡️ Next Question", callback_data="next_practice")],
+            [InlineKeyboardButton("🔄 Change Difficulty", callback_data="change_difficulty")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="home")],
+        ]),
     )
 
 
 # =========================================================
-# QUIZ GENERATOR
+# QUICK QUIZ
 # =========================================================
 
-async def generate_quiz(topic):
-
+def generate_quiz(topic):
     prompt = f"""
-Create exactly 5 multiple choice questions.
-
-Topic:
+Create exactly 5 high-quality MCQ questions on:
 {topic}
 
-Difficulty:
-
-Q1 = Easy
-Q2 = Easy-Medium
-Q3 = Medium
-Q4 = Medium-Hard
-Q5 = Hard
-
-Return ONLY valid JSON.
-
-Format:
+Return ONLY valid JSON in this exact structure:
 
 [
   {{
     "question": "Question",
-    "options": [
-      "Option A",
-      "Option B",
-      "Option C",
-      "Option D"
-    ],
+    "options": ["A", "B", "C", "D"],
     "correct": 0,
-    "explanation": "Short explanation"
+    "explanation": "Why the correct answer is correct"
   }}
 ]
 
 Rules:
-
 - Exactly 5 questions.
-- Exactly 4 options each.
-- correct must be 0, 1, 2 or 3.
-- Questions must be different.
+- Exactly 4 options per question.
+- correct is 0, 1, 2 or 3.
+- Q1 easy, Q2 easy-medium, Q3 medium, Q4 medium-hard, Q5 hard.
+- Questions must be unambiguous.
 - No markdown.
-- No text outside JSON.
 """
 
-    try:
+    result = gemini_text(prompt)
+    quiz = parse_json_response(result)
 
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt
-        )
-
-        text = response.text.strip()
-
-        text = text.replace(
-            "```json",
-            ""
-        )
-
-        text = text.replace(
-            "```",
-            ""
-        )
-
-        text = text.strip()
-
-        quiz = json.loads(text)
-
-        if not isinstance(quiz, list):
-            return None
-
-        if len(quiz) < 5:
-            return None
-
-        return quiz[:5]
-
-    except Exception as e:
-
-        logger.error(
-            f"QUIZ ERROR: {e}",
-            exc_info=True
-        )
-
+    if not isinstance(quiz, list) or len(quiz) < 5:
         return None
 
+    clean = []
+    for q in quiz[:5]:
+        if (
+            isinstance(q, dict)
+            and isinstance(q.get("options"), list)
+            and len(q["options"]) == 4
+            and "question" in q
+            and "correct" in q
+        ):
+            clean.append(q)
 
-# =========================================================
-# QUIZ TOPIC
-# =========================================================
+    return clean if len(clean) == 5 else None
 
-async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    topic = update.message.text.strip()
-
-    context.user_data["waiting_for_topic"] = False
+async def start_quiz(update, context):
+    context.user_data["mode"] = "quiz_topic"
 
     await update.message.reply_text(
-        f"🎯 {topic} ka quiz bana raha hoon..."
+        "🎯 QUICK QUIZ\n\n"
+        "Kis topic ka quiz chahiye?\n\n"
+        "Example:\n"
+        "Physics - Laws of Motion\n"
+        "Maths - Integration\n"
+        "Chemistry - Chemical Bonding"
     )
 
-    quiz = await generate_quiz(topic)
+
+async def receive_quiz_topic(update, context):
+    topic = update.message.text.strip()
+
+    await update.message.reply_text(
+        f"🎯 {topic} ka quiz prepare kar raha hoon..."
+    )
+
+    quiz = generate_quiz(topic)
 
     if not quiz:
-
         await update.message.reply_text(
-            "⚠️ Quiz generate nahi ho paaya.\n"
-            "Simple topic ke saath dobara try karo."
+            "⚠️ Quiz generate nahi ho paaya. Dobara try karo."
         )
-
         return
 
     user_id = update.effective_user.id
-
     get_user(user_id)
 
     context.user_data["quiz_user_id"] = user_id
@@ -544,390 +628,138 @@ async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["quiz_questions"] = quiz
     context.user_data["quiz_index"] = 0
     context.user_data["quiz_score"] = 0
+    context.user_data["mode"] = None
 
-    await send_next_question(
+    await send_next_quiz_question(
         update.effective_chat.id,
-        context
+        context,
     )
 
 
-# =========================================================
-# SEND QUIZ QUESTION
-# =========================================================
-
-async def send_next_question(chat_id, context):
-
-    questions = context.user_data.get(
-        "quiz_questions",
-        []
-    )
-
-    index = context.user_data.get(
-        "quiz_index",
-        0
-    )
+async def send_next_quiz_question(chat_id, context):
+    questions = context.user_data.get("quiz_questions", [])
+    index = context.user_data.get("quiz_index", 0)
 
     if index >= len(questions):
-
-        await finish_quiz(
-            chat_id,
-            context
-        )
-
+        await finish_quiz(chat_id, context)
         return
 
     q = questions[index]
 
     try:
+        correct = int(q["correct"])
+        if correct not in range(4):
+            raise ValueError("Invalid correct option.")
 
         poll = await context.bot.send_poll(
-
             chat_id=chat_id,
-
-            question=(
-                f"Q{index + 1}/5\n\n"
-                f"{q['question']}"
-            ),
-
-            options=q["options"],
-
+            question=f"Q{index + 1}/5\n\n{q['question']}",
+            options=[str(x) for x in q["options"]],
             type="quiz",
-
-            correct_option_id=int(
-                q["correct"]
-            ),
-
+            correct_option_id=correct,
             is_anonymous=False,
         )
 
         poll_data[poll.poll.id] = {
-
             "chat_id": chat_id,
-
-            "user_id":
-                context.user_data.get(
-                    "quiz_user_id"
-                ),
-
-            "question_index": index,
-
-            "correct":
-                int(q["correct"]),
-
-            "explanation":
-                q.get(
-                    "explanation",
-                    "Correct answer explained."
-                ),
+            "user_id": context.user_data["quiz_user_id"],
+            "correct": correct,
+            "explanation": q.get("explanation", "Correct answer explained."),
+            "topic": context.user_data.get("quiz_topic", "General"),
         }
 
-    except Exception as e:
-
-        logger.error(
-            f"POLL ERROR: {e}",
-            exc_info=True
-        )
-
+    except Exception:
+        logger.error("Poll send error", exc_info=True)
         await context.bot.send_message(
             chat_id=chat_id,
             text="⚠️ Quiz question send nahi ho paaya."
         )
 
 
-# =========================================================
-# POLL ANSWER
-# =========================================================
-
-async def poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+async def poll_answer(update, context):
     answer = update.poll_answer
+    data = poll_data.pop(answer.poll_id, None)
 
-    poll_id = answer.poll_id
-
-    if poll_id not in poll_data:
+    if not data:
         return
 
-    data = poll_data.pop(poll_id)
-
-    chat_id = data["chat_id"]
-
+    selected = answer.option_ids[0] if answer.option_ids else -1
     user_id = data["user_id"]
-
-    selected = (
-        answer.option_ids[0]
-        if answer.option_ids
-        else -1
-    )
-
-    correct = data["correct"]
-
-    explanation = data["explanation"]
-
     user = get_user(user_id)
 
     user["questions"] += 1
 
-    topic = context.user_data.get(
-        "quiz_topic",
-        "General"
+    topic_stats = user["topics"].setdefault(
+        data["topic"],
+        {"correct": 0, "total": 0},
     )
+    topic_stats["total"] += 1
 
-    if topic not in user["topics"]:
-
-        user["topics"][topic] = {
-            "correct": 0,
-            "total": 0
-        }
-
-    user["topics"][topic]["total"] += 1
-
-    if selected == correct:
-
+    if selected == data["correct"]:
         user["correct"] += 1
-
         user["xp"] += 20
-
-        user["topics"][topic]["correct"] += 1
-
-        context.user_data["quiz_score"] += 1
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "✅ Correct!\n\n"
-                f"💡 Explanation:\n{explanation}"
-            )
+        topic_stats["correct"] += 1
+        context.user_data["quiz_score"] = (
+            context.user_data.get("quiz_score", 0) + 1
         )
 
+        result_text = (
+            "✅ Correct!\n\n"
+            f"💡 {data['explanation']}"
+        )
     else:
-
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "❌ Not quite!\n\n"
-                f"💡 Explanation:\n{explanation}"
-            )
+        result_text = (
+            "❌ Incorrect!\n\n"
+            f"💡 {data['explanation']}"
         )
 
-    context.user_data["quiz_index"] += 1
-
-    await send_next_question(
-        chat_id,
-        context
+    await context.bot.send_message(
+        chat_id=data["chat_id"],
+        text=result_text,
     )
 
+    context.user_data["quiz_index"] = (
+        context.user_data.get("quiz_index", 0) + 1
+    )
 
-# =========================================================
-# QUIZ FINISH
-# =========================================================
+    await send_next_quiz_question(
+        data["chat_id"],
+        context,
+    )
+
 
 async def finish_quiz(chat_id, context):
-
-    user_id = context.user_data.get(
-        "quiz_user_id"
-    )
-
+    user_id = context.user_data.get("quiz_user_id")
     if not user_id:
         return
 
     user = get_user(user_id)
-
-    score = context.user_data.get(
-        "quiz_score",
-        0
-    )
-
-    topic = context.user_data.get(
-        "quiz_topic",
-        "General"
-    )
+    score = context.user_data.get("quiz_score", 0)
+    topic = context.user_data.get("quiz_topic", "General")
 
     user["quizzes"] += 1
-
-    earned_xp = score * 30
-
+    earned_xp = score * 10
     user["xp"] += earned_xp
 
     if score == 5:
-
-        message = "🏆 PERFECT SCORE! 🔥"
-
+        message = "🏆 PERFECT SCORE!"
     elif score >= 4:
-
-        message = "🔥 Excellent performance!"
-
+        message = "🔥 Excellent!"
     elif score >= 3:
-
-        message = "👍 Good job! Thoda aur practice karo."
-
+        message = "👍 Good job!"
     else:
-
-        message = "💪 Don't worry! Practice se improve hoga."
+        message = "💪 Keep practicing!"
 
     await context.bot.send_message(
-
         chat_id=chat_id,
-
         text=(
             "🏁 QUIZ COMPLETE!\n\n"
-
             f"📚 Topic: {topic}\n"
             f"🎯 Score: {score}/5\n"
-            f"⭐ XP Earned: {earned_xp}\n\n"
-
+            f"⭐ XP Earned: +{earned_xp}\n\n"
             f"{message}"
         ),
-
-        reply_markup=main_keyboard()
-    )
-
-    context.user_data.pop(
-        "quiz_questions",
-        None
-    )
-
-    context.user_data.pop(
-        "quiz_index",
-        None
-    )
-
-    context.user_data.pop(
-        "quiz_score",
-        None
-    )
-
-
-# =========================================================
-# PROGRESS
-# =========================================================
-
-async def progress_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    user = get_user(user_id)
-
-    xp = user["xp"]
-
-    level = (
-        xp // 100
-    ) + 1
-
-    total = user["questions"]
-
-    correct = user["correct"]
-
-    accuracy = 0
-
-    if total:
-
-        accuracy = round(
-            correct / total * 100
-        )
-
-    topic_text = ""
-
-    for topic, stats in user["topics"].items():
-
-        if stats["total"]:
-
-            acc = round(
-                stats["correct"]
-                / stats["total"]
-                * 100
-            )
-
-            topic_text += (
-                f"• {topic}: {acc}%\n"
-            )
-
-    if not topic_text:
-
-        topic_text = (
-            "Abhi topic data nahi hai."
-        )
-
-    text = (
-        "📊 MY PROGRESS\n\n"
-
-        f"⭐ Level: {level}\n"
-        f"⚡ XP: {xp}\n"
-        f"🔥 Streak: {user['streak']} days\n\n"
-
-        f"🎯 Quizzes: {user['quizzes']}\n"
-        f"📝 Questions: {total}\n"
-        f"✅ Correct: {correct}\n"
-        f"📈 Accuracy: {accuracy}%\n\n"
-
-        "📚 Topic Performance:\n"
-        f"{topic_text}"
-    )
-
-    await update.message.reply_text(
-        text,
-        reply_markup=main_keyboard()
-    )
-
-
-# =========================================================
-# WEAK TOPICS
-# =========================================================
-
-async def weak_topics(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_id = update.effective_user.id
-
-    user = get_user(user_id)
-
-    weak = []
-
-    for topic, stats in user["topics"].items():
-
-        if stats["total"] >= 2:
-
-            accuracy = (
-                stats["correct"]
-                / stats["total"]
-                * 100
-            )
-
-            if accuracy < 60:
-
-                weak.append(
-                    f"• {topic}: {round(accuracy)}%"
-                )
-
-    if weak:
-
-        text = (
-            "⚡ PRACTICE MORE\n\n"
-
-            "Ye topics thode weak hain:\n\n"
-
-            + "\n".join(weak)
-
-            + "\n\n🎯 In topics ka quiz practice karo."
-        )
-
-    else:
-
-        text = (
-            "🔥 Great job!\n\n"
-
-            "Abhi koi major weak topic detect nahi hua.\n\n"
-
-            "Regular practice continue rakho!"
-        )
-
-    await update.message.reply_text(
-        text,
-        reply_markup=main_keyboard()
+        reply_markup=menu_keyboard(),
     )
 
 
@@ -935,285 +767,307 @@ async def weak_topics(
 # TOPPER MODE
 # =========================================================
 
-async def topper_start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def start_topper(update, context):
     context.user_data.clear()
-
-    context.user_data["roadmap_step"] = 1
-
+    context.user_data["mode"] = "topper_goal"
     context.user_data["roadmap"] = {}
 
     await update.message.reply_text(
         "🔥 TOPPER MODE\n\n"
-
-        "Tumhara personalised study roadmap banate hain! 🚀\n\n"
-
-        "🎯 Tumhara goal / exam kya hai?"
+        "Main tumhare liye proper personalised roadmap banaunga.\n\n"
+        "🎯 Goal / Exam kya hai?\n\n"
+        "Example: JEE 2027 / Boards / CA Foundation"
     )
 
 
-async def roadmap_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def topper_router(update, context):
     text = update.message.text.strip()
+    mode = context.user_data.get("mode")
+    roadmap = context.user_data.setdefault("roadmap", {})
 
-    step = context.user_data.get(
-        "roadmap_step"
-    )
-
-    roadmap = context.user_data.setdefault(
-        "roadmap",
-        {}
-    )
-
-    if step == 1:
-
+    if mode == "topper_goal":
         roadmap["goal"] = text
-
-        context.user_data[
-            "roadmap_step"
-        ] = 2
-
+        context.user_data["mode"] = "topper_date"
         await update.message.reply_text(
-            "📅 Exam ki date kya hai?\n\n"
-            "Example: 15 December 2026"
+            "📅 Exam date kya hai?\n\n"
+            "Example: 15 May 2027"
         )
-
-        return True
-
-    if step == 2:
-
-        roadmap["date"] = text
-
-        context.user_data[
-            "roadmap_step"
-        ] = 3
-
-        await update.message.reply_text(
-            "📚 Tumhare subjects kaunse hain?\n\n"
-            "Example:\n"
-            "Physics, Chemistry, Maths"
-        )
-
-        return True
-
-    if step == 3:
-
-        roadmap["subjects"] = text
-
-        context.user_data[
-            "roadmap_step"
-        ] = 4
-
-        await update.message.reply_text(
-            "⏰ Roz kitne hours padh sakte ho?"
-        )
-
-        return True
-
-    if step == 4:
-
-        roadmap["hours"] = text
-
-        context.user_data[
-            "roadmap_step"
-        ] = 5
-
-        await update.message.reply_text(
-            "📈 Apna current level batao.\n\n"
-            "Beginner / Average / Good"
-        )
-
-        return True
-
-    if step == 5:
-
-        roadmap["level"] = text
-
-        await update.message.reply_text(
-            "🔥 Roadmap prepare kar raha hoon..."
-        )
-
-        prompt = f"""
-Create a personalised study roadmap.
-
-Goal:
-{roadmap.get("goal")}
-
-Exam date:
-{roadmap.get("date")}
-
-Subjects:
-{roadmap.get("subjects")}
-
-Daily study hours:
-{roadmap.get("hours")}
-
-Current level:
-{roadmap.get("level")}
-
-Give:
-
-1. Overall strategy
-2. Subject priority
-3. Daily study structure
-4. Weekly revision plan
-5. Practice strategy
-6. Test strategy
-7. Important habits
-8. Today's first mission
-
-Use simple Hinglish.
-Make it practical and realistic.
-"""
-
-        answer = await ask_gemini(prompt)
-
-        context.user_data[
-            "roadmap_step"
-        ] = None
-
-        await update.message.reply_text(
-            answer
-        )
-
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "🔥 Today's Mission",
-                        callback_data="mission"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "📊 My Progress",
-                        callback_data="progress"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🏠 Main Menu",
-                        callback_data="home"
-                    )
-                ],
-            ]
-        )
-
-        await update.message.reply_text(
-            "🚀 Roadmap ready!",
-            reply_markup=keyboard
-        )
-
-        return True
-
-    return False
-
-
-# =========================================================
-# DAILY MISSION
-# =========================================================
-
-async def daily_mission(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    roadmap = context.user_data.get(
-        "roadmap",
-        {}
-    )
-
-    if not roadmap:
-
-        await update.message.reply_text(
-            "Pehle Topper Mode setup karo.",
-            reply_markup=main_keyboard()
-        )
-
         return
 
+    if mode == "topper_date":
+        roadmap["date"] = text
+        context.user_data["mode"] = "topper_subjects"
+        await update.message.reply_text(
+            "📚 Subjects batao.\n\n"
+            "Example: Physics, Chemistry, Maths"
+        )
+        return
+
+    if mode == "topper_subjects":
+        roadmap["subjects"] = text
+        context.user_data["mode"] = "topper_hours"
+        await update.message.reply_text(
+            "⏰ Roz realistically kitne hours padh sakte ho?"
+        )
+        return
+
+    if mode == "topper_hours":
+        roadmap["hours"] = text
+        context.user_data["mode"] = "topper_level"
+        await update.message.reply_text(
+            "📈 Current preparation level?\n\n"
+            "Beginner / Average / Good"
+        )
+        return
+
+    if mode == "topper_level":
+        roadmap["level"] = text
+        await create_roadmap(update, context)
+
+
+async def create_roadmap(update, context):
+    roadmap = context.user_data["roadmap"]
+
     await update.message.reply_text(
-        "🔥 Aaj ka mission bana raha hoon..."
+        "🔥 Details mil gaye!\n\n"
+        "Ab actual day-wise + phase-wise roadmap generate kar raha hoon..."
     )
 
     prompt = f"""
-Create today's realistic study mission.
+You are an expert academic planner.
 
-Goal:
-{roadmap.get("goal")}
+Create a REALISTIC, detailed and personalised study roadmap.
 
-Subjects:
-{roadmap.get("subjects")}
+Student:
+Goal/Exam: {roadmap["goal"]}
+Exam Date: {roadmap["date"]}
+Subjects: {roadmap["subjects"]}
+Daily Study Hours: {roadmap["hours"]}
+Current Level: {roadmap["level"]}
 
-Daily hours:
-{roadmap.get("hours")}
+First calculate the approximate time available until the exam.
+Then create a practical plan that fits the student's available hours.
 
-Current level:
-{roadmap.get("level")}
+The roadmap MUST contain:
 
-Give:
+🔥 1. FINAL TARGET
+What the student should achieve before the exam.
 
-• 3 study tasks
-• 1 revision task
-• 1 practice/test task
-• Short motivation
+📅 2. PREPARATION PHASES
+Phase 1 - Foundation
+Phase 2 - Syllabus/Concept Completion
+Phase 3 - Question Practice
+Phase 4 - Revision
+Phase 5 - Mock Tests / Final Revision
 
+For each phase give duration, subjects and measurable targets.
+
+📚 3. SUBJECT-WISE STRATEGY
+For every subject:
+- Priority
+- What to study first
+- Practice method
+- Revision method
+- Test strategy
+
+🗓️ 4. WEEKLY SYSTEM
+Give a repeatable Monday-Sunday structure.
+
+⏰ 5. DAILY ROUTINE
+Create a realistic daily timetable within the given hours.
+Include breaks.
+
+📝 6. QUESTION PRACTICE PLAN
+Daily and weekly question targets.
+
+🔄 7. REVISION SYSTEM
+Use a sensible spaced-revision approach.
+
+🧪 8. MOCK TEST PLAN
+When to start mocks, frequency, analysis method.
+
+⚡ 9. WEAK TOPIC SYSTEM
+How the student should detect and fix weak chapters.
+
+🚨 10. LAST 30 DAYS
+Give a focused final-month strategy.
+
+🔥 11. FIRST 7 DAYS
+Give EXACT Day 1, Day 2 ... Day 7 tasks.
+
+🎯 12. TODAY'S MISSION
+Give today's tasks based on the student's level and available hours.
+
+Rules:
+- Do not make an impossible topper-style timetable.
+- Do not assume the student can study 15+ hours.
+- Keep it practical.
+- Use simple Hinglish.
+- Use clear headings.
+- Make targets measurable.
+- If the exact exam date format is unclear, still make the best reasonable plan from the information supplied.
+"""
+
+    answer = await gemini_text(prompt)
+
+    if not answer:
+        await update.message.reply_text(
+            "⚠️ Roadmap generate nahi ho paaya. Please dobara try karo."
+        )
+        return
+
+    context.user_data["generated_roadmap"] = answer
+    context.user_data["mode"] = None
+
+    await update.message.reply_text(answer)
+
+    await update.message.reply_text(
+        "🚀 Roadmap ready! Ab kya karna hai?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔥 Today's Mission", callback_data="mission")],
+            [InlineKeyboardButton("📚 Study Corner", callback_data="study")],
+            [InlineKeyboardButton("📊 My Progress", callback_data="progress")],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="home")],
+        ]),
+    )
+
+
+async def daily_mission(update, context):
+    roadmap = context.user_data.get("generated_roadmap")
+
+    if not roadmap:
+        await update.message.reply_text(
+            "Pehle Topper Mode me roadmap banao."
+        )
+        return
+
+    await update.message.reply_text(
+        "🔥 Aaj ka mission roadmap ke according bana raha hoon..."
+    )
+
+    prompt = f"""
+Here is the student's personalised roadmap:
+
+{roadmap}
+
+Create today's exact study mission.
+
+Include:
+1. Total study time
+2. Task 1 with duration and target
+3. Task 2 with duration and target
+4. Task 3 with duration and target
+5. Revision
+6. Questions/test
+7. End-of-day target
+
+Make it achievable in the student's available hours.
 Use simple Hinglish.
 """
 
-    answer = await ask_gemini(prompt)
+    answer = await gemini_text(prompt)
+
+    if not answer:
+        await update.message.reply_text(
+            "⚠️ Today's mission generate nahi ho paaya."
+        )
+        return
+
+    await update.message.reply_text(answer)
 
     await update.message.reply_text(
-        answer
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "✅ Complete Today",
-                    callback_data="complete_day"
-                )
-            ]
-        ]
-    )
-
-    await update.message.reply_text(
-        "Mission complete hone ke baad button dabao 👇",
-        reply_markup=keyboard
+        "Mission complete hone ke baad 👇",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Complete Today", callback_data="complete_day")]
+        ]),
     )
 
 
-# =========================================================
-# COMPLETE DAY
-# =========================================================
-
-async def complete_day(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def complete_day(update, context):
     user_id = update.effective_user.id
-
     user = get_user(user_id)
 
-    user["xp"] += 50
+    today = date.today().isoformat()
 
+    # Prevent repeated clicks on the same day's mission.
+    if user["last_mission"] == today:
+        await update.message.reply_text(
+            "✅ Aaj ka mission already complete marked hai!"
+        )
+        return
+
+    user["last_mission"] = today
+    user["xp"] += 50
     user["streak"] += 1
 
     await update.message.reply_text(
-        "🎉 DAY COMPLETE!\n\n"
-
-        "🔥 +1 Streak\n"
-        "⭐ +50 XP\n\n"
-
+        "🎉 TODAY COMPLETE!\n\n"
+        "⭐ +50 XP\n"
+        "🔥 +1 Streak\n\n"
         "Kal phir continue karna! 🚀"
+    )
+
+
+# =========================================================
+# PROGRESS / WEAK TOPICS
+# =========================================================
+
+async def show_progress(update, context):
+    user = get_user(update.effective_user.id)
+
+    total = user["questions"]
+    accuracy = round(user["correct"] / total * 100) if total else 0
+    level = user["xp"] // 100 + 1
+
+    topic_lines = []
+    for topic, stats in user["topics"].items():
+        if stats["total"]:
+            acc = round(stats["correct"] / stats["total"] * 100)
+            topic_lines.append(f"• {topic}: {acc}%")
+
+    topics = "\n".join(topic_lines) if topic_lines else "No topic data yet."
+
+    await update.message.reply_text(
+        "📊 MY PROGRESS\n\n"
+        f"⭐ Level: {level}\n"
+        f"⚡ XP: {user['xp']}\n"
+        f"🔥 Streak: {user['streak']} days\n\n"
+        f"🎯 Quizzes: {user['quizzes']}\n"
+        f"📝 Questions: {total}\n"
+        f"✅ Correct: {user['correct']}\n"
+        f"📈 Accuracy: {accuracy}%\n\n"
+        "📚 Topic Performance:\n"
+        f"{topics}",
+        reply_markup=menu_keyboard(),
+    )
+
+
+async def show_weak(update, context):
+    user = get_user(update.effective_user.id)
+    weak = []
+
+    for topic, stats in user["topics"].items():
+        if stats["total"] >= 2:
+            acc = stats["correct"] / stats["total"] * 100
+            if acc < 60:
+                weak.append(f"• {topic}: {round(acc)}%")
+
+    if weak:
+        text = (
+            "⚡ WEAK TOPICS\n\n"
+            "Extra practice ki zarurat:\n\n"
+            + "\n".join(weak)
+            + "\n\n🎯 Study Corner se in topics ko Easy → Hard practice karo."
+        )
+    else:
+        text = (
+            "🔥 Abhi koi major weak topic detect nahi hua.\n\n"
+            "More questions solve karoge to tracking aur accurate hogi."
+        )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=menu_keyboard(),
     )
 
 
@@ -1221,450 +1075,196 @@ async def complete_day(
 # BUTTON HANDLER
 # =========================================================
 
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def button_handler(update, context):
     query = update.callback_query
-
     await query.answer()
 
     data = query.data
 
-
-    # ---------------- HOME ----------------
-
     if data == "home":
-
-        context.user_data.clear()
-
+        clear_mode(context)
         await query.message.reply_text(
             "🏠 Main Menu\n\nChoose an option 👇",
-            reply_markup=main_keyboard()
+            reply_markup=menu_keyboard(),
         )
-
         return
 
-
-    # ---------------- DOUBT ----------------
-
-    if data == "ask":
-
-        context.user_data[
-            "waiting_for_doubt"
-        ] = True
-
-        context.user_data[
-            "waiting_for_topic"
-        ] = False
-
-        context.user_data[
-            "waiting_for_search"
-        ] = False
-
+    if data == "doubt":
+        clear_mode(context)
+        context.user_data["mode"] = "doubt"
         await query.message.reply_text(
             "💡 DOUBT BUDDY\n\n"
-
             "Apna question bhejo 👇\n\n"
-
             "Example:\n"
-            "• Explain Newton's Second Law\n"
-            "• Solve x² + 5x + 6 = 0\n"
-            "• What is photosynthesis?\n"
-            "• Explain integration in easy words"
+            "Solve x² + 5x + 6 = 0"
         )
-
         return
 
-
-    # ---------------- PHOTO ----------------
-
-    if data == "photo":
-
-        context.user_data[
-            "waiting_for_doubt"
-        ] = False
-
-        context.user_data[
-            "waiting_for_topic"
-        ] = False
-
-        context.user_data[
-            "waiting_for_search"
-        ] = False
-
+    if data == "snap":
+        clear_mode(context)
+        context.user_data["mode"] = "snap"
         await query.message.reply_text(
             "📸 SNAP & SOLVE\n\n"
-
             "Question ki clear photo bhejo 👇\n\n"
-
-            "Photo aate hi main usko solve kar dunga."
+            "Photo aate hi complete solution milega."
         )
-
         return
 
-
-    # ---------------- STUDY CORNER ----------------
-
-    if data == "search":
-
-        context.user_data[
-            "waiting_for_search"
-        ] = True
-
-        context.user_data[
-            "waiting_for_doubt"
-        ] = False
-
-        context.user_data[
-            "waiting_for_topic"
-        ] = False
-
+    if data == "study":
+        clear_mode(context)
+        context.user_data["mode"] = "study_topic"
         await query.message.reply_text(
             "📚 STUDY CORNER\n\n"
-
-            "Kis topic ke baare me padhna hai?\n\n"
-
-            "Example:\n"
-            "• Thermodynamics\n"
-            "• Organic Chemistry\n"
-            "• Calculus\n"
-            "• Cell Biology"
+            "Topic bhejo 👇\n\n"
+            "Example: Newton's Laws / Integration / Organic Chemistry"
         )
-
         return
 
+    if data == "study_easy":
+        context.user_data["difficulty"] = "Easy"
+        await query.message.reply_text(
+            "🟢 EASY MODE\n\nQuestion prepare kar raha hoon..."
+        )
+        await send_practice_question(query.message, context)
+        return
 
-    # ---------------- QUIZ ----------------
+    if data == "study_hard":
+        context.user_data["difficulty"] = "Hard"
+        await query.message.reply_text(
+            "🔴 HARD MODE\n\nChallenging question prepare kar raha hoon..."
+        )
+        await send_practice_question(query.message, context)
+        return
+
+    if data == "change_difficulty":
+        context.user_data["mode"] = "study_difficulty"
+        await query.message.reply_text(
+            "Difficulty choose karo 👇",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🟢 Easy", callback_data="study_easy"),
+                    InlineKeyboardButton("🔴 Hard", callback_data="study_hard"),
+                ],
+                [InlineKeyboardButton("🏠 Main Menu", callback_data="home")],
+            ]),
+        )
+        return
+
+    if data == "next_practice":
+        await query.message.reply_text(
+            "🧠 Next question generate kar raha hoon..."
+        )
+        await send_practice_question(query.message, context)
+        return
 
     if data == "quiz":
-
-        context.user_data[
-            "waiting_for_topic"
-        ] = True
-
-        context.user_data[
-            "waiting_for_doubt"
-        ] = False
-
-        context.user_data[
-            "waiting_for_search"
-        ] = False
-
+        clear_mode(context)
+        context.user_data["mode"] = "quiz_topic"
         await query.message.reply_text(
             "🎯 QUICK QUIZ\n\n"
-
-            "Kis topic ka quiz chahiye?\n\n"
-
-            "Example:\n"
-            "Physics - Laws of Motion\n"
-            "Chemistry - Periodic Table\n"
-            "Maths - Quadratic Equation"
+            "Kis topic ka quiz chahiye?"
         )
-
         return
-
-
-    # ---------------- TOPPER ----------------
 
     if data == "topper":
-
-        context.user_data.clear()
-
-        context.user_data[
-            "roadmap_step"
-        ] = 1
-
-        context.user_data[
-            "roadmap"
-        ] = {}
-
+        clear_mode(context)
+        context.user_data["mode"] = "topper_goal"
+        context.user_data["roadmap"] = {}
         await query.message.reply_text(
             "🔥 TOPPER MODE\n\n"
-
-            "Tumhara personalised roadmap banate hain! 🚀\n\n"
-
-            "🎯 Tumhara goal / exam kya hai?"
+            "🎯 Goal / Exam kya hai?"
         )
-
         return
 
+    if data == "mission":
+        await daily_mission(query.message, context)
+        return
 
-    # ---------------- PROGRESS ----------------
+    if data == "complete_day":
+        await complete_day(query.message, context)
+        return
 
     if data == "progress":
-
-        user_id = update.effective_user.id
-
-        user = get_user(user_id)
-
-        xp = user["xp"]
-
-        level = (
-            xp // 100
-        ) + 1
-
+        user = get_user(update.effective_user.id)
         total = user["questions"]
-
-        correct = user["correct"]
-
-        accuracy = 0
-
-        if total:
-
-            accuracy = round(
-                correct / total * 100
-            )
+        accuracy = round(user["correct"] / total * 100) if total else 0
+        level = user["xp"] // 100 + 1
 
         await query.message.reply_text(
-
             "📊 MY PROGRESS\n\n"
-
             f"⭐ Level: {level}\n"
-            f"⚡ XP: {xp}\n"
+            f"⚡ XP: {user['xp']}\n"
             f"🔥 Streak: {user['streak']} days\n\n"
-
             f"🎯 Quizzes: {user['quizzes']}\n"
             f"📝 Questions: {total}\n"
-            f"✅ Correct: {correct}\n"
+            f"✅ Correct: {user['correct']}\n"
             f"📈 Accuracy: {accuracy}%",
-
-            reply_markup=main_keyboard()
+            reply_markup=menu_keyboard(),
         )
-
         return
 
-
-    # ---------------- WEAK ----------------
-
     if data == "weak":
-
-        user_id = update.effective_user.id
-
-        user = get_user(user_id)
-
+        user = get_user(update.effective_user.id)
         weak = []
 
         for topic, stats in user["topics"].items():
-
             if stats["total"] >= 2:
-
-                acc = (
-                    stats["correct"]
-                    / stats["total"]
-                    * 100
-                )
-
+                acc = stats["correct"] / stats["total"] * 100
                 if acc < 60:
+                    weak.append(f"• {topic}: {round(acc)}%")
 
-                    weak.append(
-                        f"• {topic}: {round(acc)}%"
-                    )
-
-        if weak:
-
-            text = (
-                "⚡ WEAK TOPICS\n\n"
-
-                + "\n".join(weak)
-
-                + "\n\n🎯 In topics par practice karo."
-            )
-
-        else:
-
-            text = (
-                "🔥 Great job!\n\n"
-
-                "Abhi koi major weak topic detect nahi hua."
-            )
+        text = (
+            "⚡ WEAK TOPICS\n\n"
+            + ("\n".join(weak) if weak else "🔥 No major weak topic detected yet.")
+        )
 
         await query.message.reply_text(
             text,
-            reply_markup=main_keyboard()
+            reply_markup=menu_keyboard(),
         )
-
-        return
-
-
-    # ---------------- MISSION ----------------
-
-    if data == "mission":
-
-        roadmap = context.user_data.get(
-            "roadmap",
-            {}
-        )
-
-        if not roadmap:
-
-            await query.message.reply_text(
-                "Pehle Topper Mode setup karo."
-            )
-
-            return
-
-        prompt = f"""
-Create today's study mission.
-
-Goal:
-{roadmap.get("goal")}
-
-Subjects:
-{roadmap.get("subjects")}
-
-Daily hours:
-{roadmap.get("hours")}
-
-Current level:
-{roadmap.get("level")}
-
-Give 3 study tasks, revision and practice.
-Use simple Hinglish.
-"""
-
-        answer = await ask_gemini(prompt)
-
-        await query.message.reply_text(
-            answer
-        )
-
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "✅ Complete Today",
-                        callback_data="complete_day"
-                    )
-                ]
-            ]
-        )
-
-        await query.message.reply_text(
-            "Mission complete hone ke baad 👇",
-            reply_markup=keyboard
-        )
-
-        return
-
-
-    # ---------------- COMPLETE DAY ----------------
-
-    if data == "complete_day":
-
-        user_id = update.effective_user.id
-
-        user = get_user(user_id)
-
-        user["xp"] += 50
-
-        user["streak"] += 1
-
-        await query.message.reply_text(
-            "🎉 DAY COMPLETE!\n\n"
-
-            "🔥 +1 Streak\n"
-            "⭐ +50 XP\n\n"
-
-            "Keep going! 🚀"
-        )
-
         return
 
 
 # =========================================================
-# TEXT HANDLER
+# TEXT ROUTER
 # =========================================================
 
-async def text_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
+async def text_handler(update, context):
+    if not update.message or not update.message.text:
         return
 
-    if not update.message.text:
+    mode = context.user_data.get("mode")
+
+    if mode == "doubt" or mode is None:
+        await solve_doubt(update, context)
         return
 
-
-    # TOPPER MODE
-    if context.user_data.get(
-        "roadmap_step"
-    ):
-
-        handled = await roadmap_handler(
-            update,
-            context
-        )
-
-        if handled:
-            return
-
-
-    # QUIZ TOPIC
-    if context.user_data.get(
-        "waiting_for_topic"
-    ):
-
-        await receive_topic(
-            update,
-            context
-        )
-
+    if mode == "study_topic":
+        await study_topic_received(update, context)
         return
 
-
-    # STUDY CORNER
-    if context.user_data.get(
-        "waiting_for_search"
-    ):
-
-        await study_search(
-            update,
-            context
-        )
-
+    if mode == "study_answer":
+        await check_practice_answer(update, context)
         return
 
-
-    # DOUBT BUDDY
-    if context.user_data.get(
-        "waiting_for_doubt"
-    ):
-
-        await solve_doubt(
-            update,
-            context
-        )
-
+    if mode == "quiz_topic":
+        await receive_quiz_topic(update, context)
         return
 
+    if mode and mode.startswith("topper_"):
+        await topper_router(update, context)
+        return
 
-    # DIRECT QUESTION
-    # User bina button dabaye bhi question
-    # bhej sakta hai.
-
-    await solve_doubt(
-        update,
-        context
-    )
+    # Fallback: every normal text message can be treated as a doubt.
+    await solve_doubt(update, context)
 
 
 # =========================================================
 # ERROR HANDLER
 # =========================================================
 
-async def error_handler(
-    update,
-    context
-):
-
-    logger.error(
-        "Exception while handling update:",
-        exc_info=context.error
-    )
+async def error_handler(update, context):
+    logger.error("Unhandled bot error", exc_info=context.error)
 
 
 # =========================================================
@@ -1672,116 +1272,46 @@ async def error_handler(
 # =========================================================
 
 def main():
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    app.add_handler(CommandHandler("start", start))
 
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    # START
+    app.add_handler(PollAnswerHandler(poll_answer))
+
+    # PHOTO MUST be registered separately from text.
     app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+        MessageHandler(filters.PHOTO, handle_photo)
     )
 
-
-    # BUTTONS
-    app.add_handler(
-        CallbackQueryHandler(
-            button_handler
-        )
-    )
-
-
-    # QUIZ POLLS
-    app.add_handler(
-        PollAnswerHandler(
-            poll_answer
-        )
-    )
-
-
-    # =====================================================
-    # PHOTO HANDLER
-    # IMPORTANT: PHOTO HANDLER MUST EXIST
-    # =====================================================
-
-    app.add_handler(
-        MessageHandler(
-            filters.PHOTO,
-            handle_photo
-        )
-    )
-
-
-    # TEXT HANDLER
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            text_handler
+            text_handler,
         )
     )
 
+    app.add_error_handler(error_handler)
 
-    # ERRORS
-    app.add_error_handler(
-        error_handler
-    )
-
-
-    # =====================================================
-    # RENDER / LOCAL
-    # =====================================================
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            "10000"
-        )
-    )
-
-    render_url = os.environ.get(
-        "RENDER_EXTERNAL_URL"
-    )
-
+    port = int(os.environ.get("PORT", "10000"))
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
 
     if render_url:
+        webhook_url = f"{render_url}/telegram"
 
-        webhook_url = (
-            f"{render_url}/telegram"
-        )
-
-        logger.info(
-            f"Starting webhook: {webhook_url}"
-        )
+        logger.info("Starting webhook: %s", webhook_url)
 
         app.run_webhook(
-
             listen="0.0.0.0",
-
             port=port,
-
             url_path="telegram",
-
-            webhook_url=webhook_url
+            webhook_url=webhook_url,
         )
-
     else:
-
-        logger.info(
-            "Starting bot with polling..."
-        )
-
+        logger.info("Starting polling...")
         app.run_polling()
 
-
-# =========================================================
-# RUN
-# =========================================================
 
 if __name__ == "__main__":
     main()
