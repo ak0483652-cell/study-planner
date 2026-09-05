@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import base64
 import logging
 from datetime import datetime, date
 
@@ -17,6 +18,7 @@ from telegram.ext import (
 )
 from google import genai
 from google.genai import types
+from groq import Groq
 
 
 # =========================================================
@@ -27,9 +29,14 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Keep the model that was already working in your project.
+# Gemini model already used in your project.
 MODEL = "gemini-3.6-flash"
+
+# Groq fallback models.
+GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
+GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN missing in .env")
@@ -38,6 +45,7 @@ if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY missing in .env")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -165,22 +173,59 @@ class TypingIndicator:
 
 
 async def gemini_text(prompt):
+    """
+    Try Gemini first.
+    If Gemini quota/error occurs, automatically use Groq.
+    """
     try:
-        # generate_content is a blocking/synchronous SDK call. Running it
-        # directly here would freeze the bot's event loop (no other user's
-        # message, poll, or button click gets processed) until it returns.
-        # asyncio.to_thread runs it in a background thread instead.
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL,
             contents=prompt,
         )
+
         if response and response.text:
             return response.text.strip()
-        return None
+
+        logger.warning("Gemini returned an empty response. Trying Groq.")
+
     except Exception as e:
-        logger.error("Gemini text error", exc_info=True)
-        return None
+        logger.warning(
+            "Gemini failed. Trying Groq fallback: %s",
+            e,
+        )
+
+    # Groq fallback
+    if groq_client:
+        try:
+            response = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model=GROQ_TEXT_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                temperature=0.2,
+            )
+
+            if response.choices:
+                text = response.choices[0].message.content
+
+                if text:
+                    logger.info("Groq text fallback successful.")
+                    return text.strip()
+
+        except Exception as e:
+            logger.error(
+                "Groq text fallback failed: %s",
+                e,
+                exc_info=True,
+            )
+
+    return None
+
 
 
 def parse_json_response(text):
@@ -317,23 +362,19 @@ Rules:
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = resolve_chat_id(update)
-    try:
-        # Photo upload feels natural with the "upload_photo" chat action.
-        async with TypingIndicator(context.bot, chat_id, action="upload_photo"):
-            photo = update.message.photo[-1]
 
+    try:
+        async with TypingIndicator(
+            context.bot,
+            chat_id,
+            action="upload_photo",
+        ):
+            photo = update.message.photo[-1]
             telegram_file = await context.bot.get_file(photo.file_id)
             image_bytes = await telegram_file.download_as_bytearray()
 
             if not image_bytes:
                 raise ValueError("Telegram returned an empty image.")
-
-            # Use Gemini's native image Part instead of manually constructing
-            # a REST payload. This is more reliable with google-genai.
-            image_part = types.Part.from_bytes(
-                data=bytes(image_bytes),
-                mime_type="image/jpeg",
-            )
 
             prompt = """
 You are an expert visual study tutor.
@@ -372,28 +413,96 @@ Format:
 [short exam tip]
 """
 
-            # Blocking SDK call - run in a background thread so the bot
-            # keeps responding to other users/messages while this runs.
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=MODEL,
-                contents=[prompt, image_part],
-            )
-
-        # response.text can itself raise (e.g. if Gemini's safety filters
-        # blocked the image and there are no valid candidates), so this
-        # needs its own guard instead of relying on the outer except only.
-        try:
-            answer_text = response.text if response else None
-        except Exception:
-            logger.error("Gemini image response had no usable text", exc_info=True)
             answer_text = None
+
+            # -------------------------
+            # TRY GEMINI VISION
+            # -------------------------
+            try:
+                image_part = types.Part.from_bytes(
+                    data=bytes(image_bytes),
+                    mime_type="image/jpeg",
+                )
+
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=MODEL,
+                    contents=[prompt, image_part],
+                )
+
+                if response:
+                    try:
+                        answer_text = response.text
+                    except Exception:
+                        answer_text = None
+
+                if answer_text:
+                    logger.info("Gemini Vision successful.")
+
+            except Exception as e:
+                logger.warning(
+                    "Gemini Vision failed. Trying Groq Vision: %s",
+                    e,
+                )
+
+            # -------------------------
+            # TRY GROQ VISION FALLBACK
+            # -------------------------
+            if not answer_text and groq_client:
+                try:
+                    image_b64 = base64.b64encode(
+                        bytes(image_bytes)
+                    ).decode("utf-8")
+
+                    data_url = (
+                        "data:image/jpeg;base64,"
+                        + image_b64
+                    )
+
+                    groq_response = await asyncio.to_thread(
+                        groq_client.chat.completions.create,
+                        model=GROQ_VISION_MODEL,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": prompt,
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": data_url,
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                        temperature=0.2,
+                    )
+
+                    if groq_response.choices:
+                        answer_text = (
+                            groq_response.choices[0]
+                            .message.content
+                        )
+
+                    if answer_text:
+                        answer_text = answer_text.strip()
+                        logger.info("Groq Vision fallback successful.")
+
+                except Exception as e:
+                    logger.error(
+                        "Groq Vision fallback failed: %s",
+                        e,
+                        exc_info=True,
+                    )
 
         if not answer_text:
             await update.message.reply_text(
                 "⚠️ Image se answer generate nahi ho paaya.\n"
-                "Ho sakta hai photo unclear ho ya filter ho gaya ho.\n"
-                "Please clear, straight photo bhejo."
+                "Please clear, straight photo bhejo aur dobara try karo."
             )
             return
 
@@ -402,12 +511,22 @@ Format:
         await update.message.reply_text(
             "📸 Another question?",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📸 Solve Another", callback_data="snap")],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="home")],
+                [
+                    InlineKeyboardButton(
+                        "📸 Solve Another",
+                        callback_data="snap",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 Main Menu",
+                        callback_data="home",
+                    )
+                ],
             ]),
         )
 
-    except Exception as e:
+    except Exception:
         logger.error("SNAP & SOLVE ERROR", exc_info=True)
         await update.message.reply_text(
             "❌ Snap & Solve me error aa gaya.\n\n"
