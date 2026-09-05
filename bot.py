@@ -498,14 +498,14 @@ async def send_practice_question(update, context):
         question = await generate_practice_question(topic, difficulty)
 
     if not isinstance(question, dict):
-        await update.message.reply_text(
+        await update.reply_text(
             "⚠️ Question generate nahi ho paaya. Dobara try karo."
         )
         return
 
     required = ["question", "answer", "solution", "concept", "hint"]
     if not all(key in question for key in required):
-        await update.message.reply_text(
+        await update.reply_text(
             "⚠️ Question format incomplete tha. Dobara try karo."
         )
         return
@@ -513,7 +513,7 @@ async def send_practice_question(update, context):
     context.user_data["current_question"] = question
     context.user_data["mode"] = "study_answer"
 
-    await update.message.reply_text(
+    await update.reply_text(
         f"{'🟢 EASY' if difficulty == 'Easy' else '🔴 HARD'} QUESTION\n\n"
         f"📚 {topic}\n\n"
         f"{question['question']}\n\n"
@@ -1022,7 +1022,7 @@ async def daily_mission(update, context):
     roadmap = context.user_data.get("generated_roadmap")
 
     if not roadmap:
-        await update.message.reply_text(
+        await update.reply_text(
             "Pehle Topper Mode me roadmap banao."
         )
         return
@@ -1053,14 +1053,14 @@ Use simple Hinglish.
         answer = await gemini_text(prompt)
 
     if not answer:
-        await update.message.reply_text(
+        await update.reply_text(
             "⚠️ Today's mission generate nahi ho paaya."
         )
         return
 
-    await update.message.reply_text(answer)
+    await update.reply_text(answer)
 
-    await update.message.reply_text(
+    await update.reply_text(
         "Mission complete hone ke baad 👇",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Complete Today", callback_data="complete_day")]
@@ -1069,14 +1069,14 @@ Use simple Hinglish.
 
 
 async def complete_day(update, context):
-    user_id = update.effective_user.id
+    user_id = update.from_user.id
     user = get_user(user_id)
 
     today = date.today().isoformat()
 
     # Prevent repeated clicks on the same day's mission.
     if user["last_mission"] == today:
-        await update.message.reply_text(
+        await update.reply_text(
             "✅ Aaj ka mission already complete marked hai!"
         )
         return
@@ -1085,7 +1085,7 @@ async def complete_day(update, context):
     user["xp"] += 50
     user["streak"] += 1
 
-    await update.message.reply_text(
+    await update.reply_text(
         "🎉 TODAY COMPLETE!\n\n"
         "⭐ +50 XP\n"
         "🔥 +1 Streak\n\n"
