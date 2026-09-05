@@ -1,14 +1,10 @@
 import os
 import json
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from google import genai
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,7 +16,7 @@ from telegram.ext import (
 )
 
 # =========================================================
-# LOAD ENVIRONMENT VARIABLES
+# ENVIRONMENT
 # =========================================================
 
 load_dotenv()
@@ -29,10 +25,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing in .env")
+    raise ValueError("BOT_TOKEN is missing")
 
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY missing in .env")
+    raise ValueError("GEMINI_API_KEY is missing")
 
 
 # =========================================================
@@ -48,10 +44,8 @@ client = genai.Client(
 # DATA
 # =========================================================
 
-# User progress
 progress = {}
 
-# Active Telegram polls
 poll_data = {}
 
 
@@ -76,16 +70,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "🎓 *Study Help Bot*\n\n"
+        "🎓 *STUDY HELP BOT*\n\n"
         "🤖 Your AI-powered study assistant\n\n"
-        "✨ Generate quizzes on ANY topic\n"
-        "📚 Practice & improve your knowledge\n"
-        "🏆 Track your score\n\n"
+        "✨ Generate a quiz on ANY topic\n"
+        "📚 Practice with AI questions\n"
+        "🏆 Get your score\n"
+        "📊 Track your progress\n\n"
         "👇 Choose an option:",
-        reply_markup=reply_markup,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
 
@@ -99,16 +92,15 @@ async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_for_topic"] = True
 
     await update.message.reply_text(
-        "🤖 *AI Quiz Generator*\n\n"
-        "📚 Kis topic ka quiz chahiye?\n\n"
-        "Bas topic ka naam bhejo 👇\n\n"
+        "🤖 *AI QUIZ GENERATOR*\n\n"
+        "✍️ Apna study topic type karo.\n\n"
         "Examples:\n"
         "• Thermodynamics\n"
         "• Integration\n"
-        "• Chemical Bonding\n"
-        "• Cell Biology\n"
-        "• Indian Economy\n\n"
-        "✨ Tum koi bhi study topic likh sakte ho.",
+        "• Organic Chemistry\n"
+        "• Human Digestive System\n"
+        "• Probability\n\n"
+        "👇 Ab apna topic bhejo:",
         parse_mode="Markdown"
     )
 
@@ -129,22 +121,20 @@ async def generate_quiz_button(
     context.user_data["waiting_for_topic"] = True
 
     await query.message.reply_text(
-        "🤖 *AI Quiz Generator*\n\n"
-        "📚 Kis topic ka quiz chahiye?\n\n"
-        "Bas topic ka naam bhejo 👇\n\n"
-        "Examples:\n"
-        "• Thermodynamics\n"
-        "• Integration\n"
-        "• Organic Chemistry\n"
-        "• Photosynthesis\n"
-        "• Probability\n\n"
-        "✨ Koi bhi topic likh sakte ho.",
+        "🤖 *AI QUIZ GENERATOR*\n\n"
+        "✍️ Apna study topic type karo.\n\n"
+        "Example:\n"
+        "`Newton's Laws`\n"
+        "`Electrostatics`\n"
+        "`Chemical Bonding`\n"
+        "`Cell Biology`\n\n"
+        "👇 Topic bhejo:",
         parse_mode="Markdown"
     )
 
 
 # =========================================================
-# AI QUIZ GENERATOR
+# GEMINI QUIZ GENERATOR
 # =========================================================
 
 def generate_quiz(topic):
@@ -158,20 +148,20 @@ TOPIC: {topic}
 
 Requirements:
 
-1. Questions must be factually correct.
-2. Mix easy, medium and hard questions.
-3. Each question must have exactly 4 options.
-4. Only ONE option can be correct.
-5. correct must be 0, 1, 2 or 3.
-6. Give a short explanation.
-7. Do not repeat questions.
-8. Questions should be suitable for students.
-9. Stay strictly related to the requested topic.
-10. Return ONLY valid JSON.
-11. Do NOT use markdown.
-12. Do NOT use ```json.
+- Questions must be factually correct.
+- Mix easy, medium and hard questions.
+- Exactly 4 options per question.
+- Only one option is correct.
+- correct must be 0, 1, 2 or 3.
+- Give a short explanation.
+- Do not repeat questions.
+- Keep questions suitable for students.
+- Stay strictly related to the requested topic.
+- Return ONLY valid JSON.
+- Do not use markdown.
+- Do not use ```json.
 
-Return exactly this format:
+Return exactly:
 
 [
   {{
@@ -195,7 +185,6 @@ Return exactly this format:
 
     text = response.text.strip()
 
-    # Remove markdown if Gemini accidentally adds it
     if text.startswith("```"):
         text = text.replace("```json", "")
         text = text.replace("```", "")
@@ -203,31 +192,29 @@ Return exactly this format:
 
     quiz = json.loads(text)
 
-    # Basic validation
     if not isinstance(quiz, list):
-        raise ValueError("Invalid quiz format")
+        raise ValueError("Invalid quiz")
 
     if len(quiz) != 5:
         raise ValueError("Quiz must contain 5 questions")
 
-    for question in quiz:
+    for q in quiz:
 
-        if "question" not in question:
-            raise ValueError("Question missing")
+        if not all(
+            key in q
+            for key in [
+                "question",
+                "options",
+                "correct",
+                "explanation"
+            ]
+        ):
+            raise ValueError("Invalid question")
 
-        if "options" not in question:
-            raise ValueError("Options missing")
+        if len(q["options"]) != 4:
+            raise ValueError("Need exactly 4 options")
 
-        if "correct" not in question:
-            raise ValueError("Correct answer missing")
-
-        if "explanation" not in question:
-            raise ValueError("Explanation missing")
-
-        if len(question["options"]) != 4:
-            raise ValueError("Must have exactly 4 options")
-
-        if int(question["correct"]) not in [0, 1, 2, 3]:
+        if int(q["correct"]) not in [0, 1, 2, 3]:
             raise ValueError("Invalid correct answer")
 
     return quiz
@@ -250,34 +237,30 @@ async def receive_topic(
     if len(topic) < 2:
 
         await update.message.reply_text(
-            "❌ Thoda proper topic likho bhai.\n\n"
+            "❌ Proper topic likho bhai.\n\n"
             "Example: Thermodynamics"
         )
 
         return
 
-    # Stop waiting
     context.user_data["waiting_for_topic"] = False
 
     await update.message.reply_text(
-        f"🤖 *AI Quiz Generate Ho Raha Hai...*\n\n"
-        f"📚 Topic: *{topic}*\n\n"
-        "⏳ Please wait...",
+        f"🤖 *AI Quiz generate ho raha hai...*\n\n"
+        f"📚 Topic: *{topic}*\n"
+        f"⏳ Please wait...",
         parse_mode="Markdown"
     )
 
     try:
 
-        # Generate AI questions
         questions = generate_quiz(topic)
 
-        # Save quiz
         context.user_data["quiz_questions"] = questions
         context.user_data["quiz_index"] = 0
         context.user_data["quiz_score"] = 0
         context.user_data["quiz_topic"] = topic
 
-        # User progress
         user_id = update.effective_user.id
 
         if user_id not in progress:
@@ -291,14 +274,13 @@ async def receive_topic(
 
         progress[user_id]["quizzes"] += 1
 
-        # Save topic
         if topic not in progress[user_id]["topics"]:
+
             progress[user_id]["topics"][topic] = {
                 "questions": 0,
                 "correct": 0
             }
 
-        # Send first poll
         await send_poll_question(
             update.effective_chat.id,
             context
@@ -306,17 +288,16 @@ async def receive_topic(
 
     except Exception as e:
 
-        print("AI QUIZ ERROR:", e)
+        print("QUIZ ERROR:", e)
 
         await update.message.reply_text(
             "❌ Quiz generate nahi ho paaya.\n\n"
-            "Please topic ko thoda simple/specific karke "
-            "dobara try karo."
+            "Topic ko thoda specific karke try karo."
         )
 
 
 # =========================================================
-# SEND NATIVE TELEGRAM QUIZ POLL
+# SEND TELEGRAM NATIVE QUIZ
 # =========================================================
 
 async def send_poll_question(
@@ -334,7 +315,6 @@ async def send_poll_question(
         0
     )
 
-    # Quiz finished
     if index >= len(questions):
 
         await finish_quiz(
@@ -344,50 +324,49 @@ async def send_poll_question(
 
         return
 
-    question = questions[index]
+    q = questions[index]
 
-    poll_message = await context.bot.send_poll(
+    message = await context.bot.send_poll(
 
         chat_id=chat_id,
 
         question=(
             f"📝 Q{index + 1}/{len(questions)}\n\n"
-            f"{question['question']}"
+            f"{q['question']}"
         ),
 
-        options=question["options"],
+        options=q["options"],
 
         type="quiz",
 
         correct_option_id=int(
-            question["correct"]
+            q["correct"]
         ),
 
         is_anonymous=False
     )
 
-    # Save poll information
-    poll_data[poll_message.poll.id] = {
+    poll_data[message.poll.id] = {
 
         "chat_id": chat_id,
 
         "correct": int(
-            question["correct"]
+            q["correct"]
         ),
 
-        "explanation": question["explanation"],
-
-        "question_index": index,
+        "explanation": q["explanation"],
 
         "topic": context.user_data.get(
             "quiz_topic",
             "Unknown"
-        )
+        ),
+
+        "question_index": index
     }
 
 
 # =========================================================
-# HANDLE POLL ANSWER
+# POLL ANSWER
 # =========================================================
 
 async def poll_answer(
@@ -399,7 +378,6 @@ async def poll_answer(
 
     poll_id = answer.poll_id
 
-    # Unknown poll
     if poll_id not in poll_data:
         return
 
@@ -407,7 +385,6 @@ async def poll_answer(
 
     user_id = answer.user.id
 
-    # No answer
     if not answer.option_ids:
         return
 
@@ -417,7 +394,6 @@ async def poll_answer(
 
     topic = data["topic"]
 
-    # Create progress if necessary
     if user_id not in progress:
 
         progress[user_id] = {
@@ -427,10 +403,8 @@ async def poll_answer(
             "topics": {}
         }
 
-    # Update total questions
     progress[user_id]["questions"] += 1
 
-    # Update topic statistics
     if topic not in progress[user_id]["topics"]:
 
         progress[user_id]["topics"][topic] = {
@@ -440,38 +414,33 @@ async def poll_answer(
 
     progress[user_id]["topics"][topic]["questions"] += 1
 
+
     # =====================================================
     # CORRECT
     # =====================================================
 
     if selected == correct:
 
-        # Update quiz score
-        current_score = context.user_data.get(
-            "quiz_score",
-            0
-        )
-
         context.user_data["quiz_score"] = (
-            current_score + 1
+            context.user_data.get(
+                "quiz_score",
+                0
+            ) + 1
         )
 
-        # Update progress
         progress[user_id]["correct"] += 1
 
         progress[user_id]["topics"][topic]["correct"] += 1
 
         await context.bot.send_message(
-
             chat_id=data["chat_id"],
-
             text=(
                 "✅ *Correct!*\n\n"
                 f"💡 {data['explanation']}"
             ),
-
             parse_mode="Markdown"
         )
+
 
     # =====================================================
     # WRONG
@@ -480,18 +449,17 @@ async def poll_answer(
     else:
 
         await context.bot.send_message(
-
             chat_id=data["chat_id"],
-
             text=(
                 "❌ *Wrong!*\n\n"
                 f"💡 {data['explanation']}"
             ),
-
             parse_mode="Markdown"
         )
 
+
     # Next question
+
     context.user_data["quiz_index"] = (
         context.user_data.get(
             "quiz_index",
@@ -499,10 +467,8 @@ async def poll_answer(
         ) + 1
     )
 
-    # Remove old poll
     del poll_data[poll_id]
 
-    # Send next question
     await send_poll_question(
         data["chat_id"],
         context
@@ -542,27 +508,19 @@ async def finish_quiz(
         score / total
     ) * 100
 
-    # Result message
+
     if percentage >= 80:
 
-        result = (
-            "🔥 Excellent!\n"
-            "Your preparation is looking strong."
-        )
+        result = "🔥 Excellent! Your preparation is strong."
 
     elif percentage >= 60:
 
-        result = (
-            "👍 Good job!\n"
-            "Keep practicing to improve."
-        )
+        result = "👍 Good job! Keep practicing."
 
     else:
 
-        result = (
-            "📚 More practice needed.\n"
-            "Don't worry, keep learning!"
-        )
+        result = "📚 More practice needed. Keep going!"
+
 
     await context.bot.send_message(
 
@@ -577,14 +535,15 @@ async def finish_quiz(
 
             f"{result}\n\n"
 
-            "🤖 Want another quiz?\n"
-            "Use /quiz"
+            "🤖 Use /quiz to start another quiz."
         ),
 
         parse_mode="Markdown"
     )
 
-    # Clear quiz
+
+    # Clear current quiz
+
     context.user_data.pop(
         "quiz_questions",
         None
@@ -618,9 +577,7 @@ async def progress_command(
     user_id = update.effective_user.id
 
     data = progress.get(
-
         user_id,
-
         {
             "quizzes": 0,
             "questions": 0,
@@ -629,34 +586,24 @@ async def progress_command(
         }
     )
 
-    quizzes = data["quizzes"]
-    questions = data["questions"]
+    total_questions = data["questions"]
     correct = data["correct"]
 
-    if questions > 0:
-
-        accuracy = (
-            correct / questions
-        ) * 100
-
-    else:
-
-        accuracy = 0
+    accuracy = (
+        correct / total_questions * 100
+        if total_questions
+        else 0
+    )
 
     message = (
         "📊 *YOUR PROGRESS*\n\n"
-
-        f"📝 AI Quizzes: {quizzes}\n"
-        f"❓ Questions: {questions}\n"
+        f"📝 Quizzes: {data['quizzes']}\n"
+        f"❓ Questions: {total_questions}\n"
         f"✅ Correct: {correct}\n"
         f"🎯 Accuracy: {accuracy:.0f}%\n"
     )
 
-    # Topics
-    topics = data.get(
-        "topics",
-        {}
-    )
+    topics = data.get("topics", {})
 
     if topics:
 
@@ -664,28 +611,19 @@ async def progress_command(
 
         for topic, stats in topics.items():
 
-            topic_questions = stats["questions"]
-            topic_correct = stats["correct"]
+            q = stats["questions"]
+            c = stats["correct"]
 
-            if topic_questions > 0:
-
-                topic_accuracy = (
-                    topic_correct /
-                    topic_questions
-                ) * 100
-
-            else:
-
-                topic_accuracy = 0
+            topic_accuracy = (
+                c / q * 100
+                if q
+                else 0
+            )
 
             message += (
                 f"• {topic}: "
                 f"{topic_accuracy:.0f}%\n"
             )
-
-    message += (
-        "\n🚀 Keep studying and improve your score!"
-    )
 
     await update.message.reply_text(
         message,
@@ -708,40 +646,30 @@ async def button_handler(
 
     if query.data == "generate_quiz":
 
-        context.user_data[
-            "waiting_for_topic"
-        ] = True
+        context.user_data["waiting_for_topic"] = True
 
         await query.message.reply_text(
-
-            "🤖 *AI Quiz Generator*\n\n"
-
+            "🤖 *AI QUIZ GENERATOR*\n\n"
             "✍️ Apna topic type karo.\n\n"
-
             "Example:\n"
-            "`Thermodynamics`\n"
+            "`Electrostatics`\n"
             "`Integration`\n"
-            "`Organic Chemistry`\n"
-            "`Cell Biology`\n\n"
-
+            "`Organic Chemistry`\n\n"
             "👇 Topic bhejo:",
-
             parse_mode="Markdown"
         )
+
 
     elif query.data == "progress":
 
         user_id = query.from_user.id
 
         data = progress.get(
-
             user_id,
-
             {
                 "quizzes": 0,
                 "questions": 0,
-                "correct": 0,
-                "topics": {}
+                "correct": 0
             }
         )
 
@@ -755,14 +683,11 @@ async def button_handler(
         )
 
         await query.message.reply_text(
-
             "📊 *YOUR PROGRESS*\n\n"
-
             f"📝 Quizzes: {data['quizzes']}\n"
             f"❓ Questions: {questions}\n"
             f"✅ Correct: {correct}\n"
             f"🎯 Accuracy: {accuracy:.0f}%",
-
             parse_mode="Markdown"
         )
 
@@ -781,6 +706,7 @@ def main():
     )
 
     # Commands
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -803,13 +729,15 @@ def main():
     )
 
     # Buttons
+
     app.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
 
-    # Student topic messages
+    # Student topic
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -817,18 +745,59 @@ def main():
         )
     )
 
-    # Telegram native quiz polls
+    # Native Telegram polls
+
     app.add_handler(
         PollAnswerHandler(
             poll_answer
         )
     )
 
-    print(
-        "🤖 AI Study Help Bot is running..."
+    # =====================================================
+    # RENDER WEBHOOK
+    # =====================================================
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000"
+        )
     )
 
-    app.run_polling()
+    render_url = os.environ.get(
+        "RENDER_EXTERNAL_URL"
+    )
+
+    if render_url:
+
+        webhook_url = (
+            f"{render_url}/telegram"
+        )
+
+        print(
+            "🌐 Running on Render Webhook"
+        )
+
+        print(
+            f"🔗 Webhook: {webhook_url}"
+        )
+
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path="telegram",
+            webhook_url=webhook_url
+        )
+
+    else:
+
+        # Local computer testing
+
+        print(
+            "💻 Running locally with polling"
+        )
+
+        app.run_polling()
 
 
 # =========================================================
@@ -837,4 +806,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
