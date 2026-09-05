@@ -30,26 +30,28 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Used for everything except Snap & Solve (Doubt Buddy, Study Corner, Quiz, Topper Mode).
-MODEL = "gemini-3.6-flash"
+# Groq is the PRIMARY AI provider for text questions.
+GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
 
-# Snap & Solve (image questions) now runs entirely on Groq's vision model.
-# Llama 4 Scout/Maverick vision were deprecated on Groq - qwen3.6-27b is the
-# currently supported multimodal model.
+# Groq is also used for Snap & Solve image questions.
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
+# Gemini remains an optional fallback for text.
+MODEL = "gemini-3.6-flash"
+
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing in .env")
+    raise ValueError("BOT_TOKEN missing in environment")
 
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY missing in .env")
+# Gemini is optional now.
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-
+# Groq is the main provider.
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-if not groq_client:
-    logging.getLogger(__name__).warning(
-        "GROQ_API_KEY not set - Snap & Solve will not work until it's added."
+
+if not groq_client and not client:
+    raise ValueError(
+        "No AI API configured. Add GROQ_API_KEY (recommended) "
+        "or GEMINI_API_KEY."
     )
 
 logging.basicConfig(
@@ -220,22 +222,53 @@ async def solve_image_with_groq(image_bytes, prompt_text):
 
 
 async def gemini_text(prompt):
-    try:
-        # generate_content is a blocking/synchronous SDK call. Running it
-        # directly here would freeze the bot's event loop (no other user's
-        # message, poll, or button click gets processed) until it returns.
-        # asyncio.to_thread runs it in a background thread instead.
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=MODEL,
-            contents=prompt,
-        )
-        if response and response.text:
-            return response.text.strip()
-        return None
-    except Exception as e:
-        logger.error("Gemini text error", exc_info=True)
-        return None
+    """
+    AI text engine:
+    1) Groq first
+    2) Gemini fallback if Groq fails
+    """
+    if groq_client:
+        try:
+            completion = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model=GROQ_TEXT_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_completion_tokens=4096,
+            )
+
+            if completion and completion.choices:
+                content = completion.choices[0].message.content
+                if content:
+                    logger.info("Groq text response successful.")
+                    return content.strip()
+
+        except Exception:
+            logger.warning(
+                "Groq text failed. Trying Gemini fallback.",
+                exc_info=True,
+            )
+
+    if client:
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL,
+                contents=prompt,
+            )
+
+            if response and response.text:
+                logger.info("Gemini fallback response successful.")
+                return response.text.strip()
+
+        except Exception:
+            logger.warning(
+                "Gemini text fallback failed.",
+                exc_info=True,
+            )
+
+    return None
+
 
 
 def parse_json_response(text):
