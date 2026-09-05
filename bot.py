@@ -17,7 +17,6 @@ from telegram.ext import (
     filters,
 )
 from google import genai
-from google.genai import types
 from groq import Groq
 
 
@@ -31,12 +30,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Keep the model that was already working in your project.
+# Used for everything except Snap & Solve (Doubt Buddy, Study Corner, Quiz, Topper Mode).
 MODEL = "gemini-3.6-flash"
 
-# Used only as a Snap & Solve fallback when Gemini returns no usable answer.
-# Groq's current vision-capable model (Llama 4 Scout/Maverick vision were
-# deprecated on Groq - qwen3.6-27b is the supported multimodal model now).
+# Snap & Solve (image questions) now runs entirely on Groq's vision model.
+# Llama 4 Scout/Maverick vision were deprecated on Groq - qwen3.6-27b is the
+# currently supported multimodal model.
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
 if not BOT_TOKEN:
@@ -50,7 +49,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 if not groq_client:
     logging.getLogger(__name__).warning(
-        "GROQ_API_KEY not set - Snap & Solve will not have a Groq fallback."
+        "GROQ_API_KEY not set - Snap & Solve will not work until it's added."
     )
 
 logging.basicConfig(
@@ -180,10 +179,9 @@ class TypingIndicator:
 
 async def solve_image_with_groq(image_bytes, prompt_text):
     """
-    Fallback for Snap & Solve when Gemini returns no usable text
-    (e.g. blocked by safety filters, empty candidates, quota issues).
-    Uses Groq's current vision model (qwen3.6-27b).
-    Returns None if Groq isn't configured or also fails.
+    Snap & Solve engine - reads and solves the question in the image
+    using Groq's vision model (qwen3.6-27b). Returns None if Groq isn't
+    configured or the call fails.
     """
     if not groq_client:
         return None
@@ -375,6 +373,13 @@ Rules:
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = resolve_chat_id(update)
     try:
+        if not groq_client:
+            await update.message.reply_text(
+                "⚠️ Snap & Solve abhi available nahi hai.\n"
+                "GROQ_API_KEY set nahi hai bot ke environment mein."
+            )
+            return
+
         # Photo upload feels natural with the "upload_photo" chat action.
         async with TypingIndicator(context.bot, chat_id, action="upload_photo"):
             photo = update.message.photo[-1]
@@ -384,13 +389,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not image_bytes:
                 raise ValueError("Telegram returned an empty image.")
-
-            # Use Gemini's native image Part instead of manually constructing
-            # a REST payload. This is more reliable with google-genai.
-            image_part = types.Part.from_bytes(
-                data=bytes(image_bytes),
-                mime_type="image/jpeg",
-            )
 
             prompt = """
 You are an expert visual study tutor.
@@ -429,48 +427,7 @@ Format:
 [short exam tip]
 """
 
-            # Blocking SDK call - run in a background thread so the bot
-            # keeps responding to other users/messages while this runs.
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=MODEL,
-                contents=[prompt, image_part],
-            )
-
-        # response.text can itself raise (e.g. if Gemini's safety filters
-        # blocked the image and there are no valid candidates), so this
-        # needs its own guard instead of relying on the outer except only.
-        try:
-            answer_text = response.text if response else None
-        except Exception:
-            logger.error("Gemini image response had no usable text", exc_info=True)
-            answer_text = None
-
-        if not answer_text:
-            # Log everything we can about *why* Gemini returned nothing,
-            # so the real cause shows up in the Render logs instead of
-            # just a generic user-facing message.
-            try:
-                prompt_feedback = getattr(response, "prompt_feedback", None)
-                candidates = getattr(response, "candidates", None)
-                finish_reasons = (
-                    [getattr(c, "finish_reason", None) for c in candidates]
-                    if candidates else None
-                )
-                logger.warning(
-                    "Snap&Solve empty response from Gemini | prompt_feedback=%s | finish_reasons=%s | raw=%s",
-                    prompt_feedback,
-                    finish_reasons,
-                    response,
-                )
-            except Exception:
-                logger.warning("Snap&Solve empty response - could not introspect raw response", exc_info=True)
-
-            # Gemini gave nothing - try Groq's vision model as a fallback
-            # before telling the user it failed outright.
-            logger.info("Falling back to Groq vision model for Snap & Solve")
-            async with TypingIndicator(context.bot, chat_id, action="upload_photo"):
-                answer_text = await solve_image_with_groq(image_bytes, prompt)
+            answer_text = await solve_image_with_groq(image_bytes, prompt)
 
         if not answer_text:
             await update.message.reply_text(
