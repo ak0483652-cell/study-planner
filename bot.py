@@ -1,6 +1,5 @@
 import os
 import json
-import base64
 import asyncio
 import logging
 from datetime import datetime, date
@@ -177,48 +176,6 @@ class TypingIndicator:
             except asyncio.CancelledError:
                 pass
         return False
-
-
-async def solve_image_with_groq(image_bytes, prompt_text):
-    """
-    Snap & Solve engine - reads and solves the question in the image
-    using Groq's vision model (qwen3.6-27b). Returns None if Groq isn't
-    configured or the call fails.
-    """
-    if not groq_client:
-        return None
-
-    try:
-        base64_image = base64.b64encode(bytes(image_bytes)).decode("utf-8")
-
-        completion = await asyncio.to_thread(
-            groq_client.chat.completions.create,
-            model=GROQ_VISION_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            },
-                        },
-                    ],
-                }
-            ],
-            temperature=0.4,
-            max_completion_tokens=2048,
-        )
-
-        if completion and completion.choices:
-            content = completion.choices[0].message.content
-            return content.strip() if content else None
-        return None
-    except Exception:
-        logger.error("Groq vision fallback failed", exc_info=True)
-        return None
 
 
 async def gemini_text(prompt):
@@ -406,28 +363,23 @@ Rules:
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = resolve_chat_id(update)
     try:
-        if not groq_client:
-            await update.message.reply_text(
-                "⚠️ Snap & Solve abhi available nahi hai.\n"
-                "GROQ_API_KEY set nahi hai bot ke environment mein."
-            )
-            return
-
-        # Photo upload feels natural with the "upload_photo" chat action.
         async with TypingIndicator(context.bot, chat_id, action="upload_photo"):
             photo = update.message.photo[-1]
-
             telegram_file = await context.bot.get_file(photo.file_id)
             image_bytes = await telegram_file.download_as_bytearray()
 
             if not image_bytes:
                 raise ValueError("Telegram returned an empty image.")
 
+            image_part = types.Part.from_bytes(
+                data=bytes(image_bytes),
+                mime_type="image/jpeg",
+            )
+
             prompt = """
 You are an expert visual study tutor.
 
 Look carefully at the attached image.
-
 Read every visible part of the question and solve it.
 
 IMPORTANT:
@@ -460,18 +412,27 @@ Format:
 [short exam tip]
 """
 
-            answer_text = await solve_image_with_groq(image_bytes, prompt)
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL,
+                contents=[prompt, image_part],
+            )
+
+            try:
+                answer_text = response.text if response else None
+            except Exception:
+                logger.error("Gemini image response had no usable text", exc_info=True)
+                answer_text = None
 
         if not answer_text:
             await update.message.reply_text(
                 "⚠️ Image se answer generate nahi ho paaya.\n"
-                "Ho sakta hai photo unclear ho ya filter ho gaya ho.\n"
+                "Ho sakta hai photo unclear ho ya AI response nahi mila.\n"
                 "Please clear, straight photo bhejo."
             )
             return
 
         await update.message.reply_text(answer_text)
-
         await update.message.reply_text(
             "📸 Another question?",
             reply_markup=InlineKeyboardMarkup([
@@ -480,7 +441,7 @@ Format:
             ]),
         )
 
-    except Exception as e:
+    except Exception:
         logger.error("SNAP & SOLVE ERROR", exc_info=True)
         await update.message.reply_text(
             "❌ Snap & Solve me error aa gaya.\n\n"
@@ -914,14 +875,14 @@ async def finish_quiz(chat_id, context):
 
 async def start_topper(update, context):
     context.user_data.clear()
-    context.user_data["mode"] = "topper_goal"
+    context.user_data["mode"] = "topper_exam"
     context.user_data["roadmap"] = {}
 
     await update.message.reply_text(
         "🔥 TOPPER MODE\n\n"
-        "Main tumhare liye proper personalised roadmap banaunga.\n\n"
-        "🎯 Goal / Exam kya hai?\n\n"
-        "Example: JEE 2027 / Boards / CA Foundation"
+        "Main tumhare liye ek smart 7-day topper strategy banaunga. 🚀\n\n"
+        "🎯 Exam ka naam batao.\n\n"
+        "Example: JEE Main / NEET / GATE / CA Foundation / Boards"
     )
 
 
@@ -930,17 +891,17 @@ async def topper_router(update, context):
     mode = context.user_data.get("mode")
     roadmap = context.user_data.setdefault("roadmap", {})
 
-    if mode == "topper_goal":
-        roadmap["goal"] = text
-        context.user_data["mode"] = "topper_date"
+    if mode == "topper_exam":
+        roadmap["exam"] = text
+        context.user_data["mode"] = "topper_months"
         await update.message.reply_text(
-            "📅 Exam date kya hai?\n\n"
-            "Example: 15 May 2027"
+            "⏳ Exam me kitne months bache hain?\n\n"
+            "Example: 3 months / 6 months / 1 month"
         )
         return
 
-    if mode == "topper_date":
-        roadmap["date"] = text
+    if mode == "topper_months":
+        roadmap["months"] = text
         context.user_data["mode"] = "topper_subjects"
         await update.message.reply_text(
             "📚 Subjects batao.\n\n"
@@ -973,86 +934,120 @@ async def topper_router(update, context):
 async def create_roadmap(update, context):
     roadmap = context.user_data["roadmap"]
     chat_id = resolve_chat_id(update)
+    exam = roadmap["exam"]
+    months = roadmap["months"]
 
     prompt = f"""
-You are an expert academic planner.
+You are an expert academic planner and topper-strategy coach.
 
-Create a REALISTIC, detailed and personalised study roadmap.
+Create a HIGH-QUALITY, realistic and personalised 7-DAY study strategy.
 
-Student:
-Goal/Exam: {roadmap["goal"]}
-Exam Date: {roadmap["date"]}
+STUDENT DETAILS:
+Exam Name: {exam}
+Months Remaining: {months}
 Subjects: {roadmap["subjects"]}
 Daily Study Hours: {roadmap["hours"]}
-Current Level: {roadmap["level"]}
+Current Preparation Level: {roadmap["level"]}
 
-First calculate the approximate time available until the exam.
-Then create a practical plan that fits the student's available hours.
+IMPORTANT PERSONALIZATION RULES:
+- The exact exam name is "{exam}". Use this exact exam name in the main heading and naturally throughout the strategy.
+- Never replace the exam name with generic words like "your exam" when referring to the target.
+- Use the number of months remaining ({months}) to decide the priority and intensity of this week's plan.
+- Decide the strategy yourself based on the exam, subjects, months remaining, daily hours and current level.
+- Do NOT create a generic plan that would be identical for every exam.
+- Keep the workload realistic for the student's available daily hours.
+- If the exam has different subjects or preparation requirements, adapt the strategy accordingly.
+- Focus on the FIRST 7 DAYS only. Do not generate a long month-by-month roadmap.
 
-The roadmap MUST contain:
+OUTPUT FORMAT:
 
-🔥 1. FINAL TARGET
-What the student should achieve before the exam.
+🔥 TOPPER MODE — {exam}
+⏳ Months Left: {months}
+🎯 Goal: Build strong momentum for {exam}
 
-📅 2. PREPARATION PHASES
-Phase 1 - Foundation
-Phase 2 - Syllabus/Concept Completion
-Phase 3 - Question Practice
-Phase 4 - Revision
-Phase 5 - Mock Tests / Final Revision
+━━━━━━━━━━━━━━━━━━
+🚀 THIS WEEK'S STRATEGY
+━━━━━━━━━━━━━━━━━━
 
-For each phase give duration, subjects and measurable targets.
+Briefly explain what the student should achieve by the end of these 7 days and why these topics/tasks are being prioritised.
 
-📚 3. SUBJECT-WISE STRATEGY
-For every subject:
-- Priority
-- What to study first
-- Practice method
-- Revision method
-- Test strategy
+📅 DAY 1 — [clear focus]
+• Topic/task 1 + target
+• Topic/task 2 + target
+• Practice/PYQs
+• Revision
 
-🗓️ 4. WEEKLY SYSTEM
-Give a repeatable Monday-Sunday structure.
+📅 DAY 2 — [clear focus]
+• Topic/task 1 + target
+• Topic/task 2 + target
+• Practice/PYQs
+• Revision
 
-⏰ 5. DAILY ROUTINE
-Create a realistic daily timetable within the given hours.
-Include breaks.
+📅 DAY 3 — [clear focus]
+• Topic/task 1 + target
+• Topic/task 2 + target
+• Practice/PYQs
+• Revision
 
-📝 6. QUESTION PRACTICE PLAN
-Daily and weekly question targets.
+📅 DAY 4 — [clear focus]
+• Topic/task 1 + target
+• Topic/task 2 + target
+• Practice/PYQs
+• Revision
 
-🔄 7. REVISION SYSTEM
-Use a sensible spaced-revision approach.
+📅 DAY 5 — [clear focus]
+• Topic/task 1 + target
+• Topic/task 2 + target
+• Practice/PYQs
+• Revision
 
-🧪 8. MOCK TEST PLAN
-When to start mocks, frequency, analysis method.
+📅 DAY 6 — [clear focus]
+• Topic/task 1 + target
+• Topic/task 2 + target
+• Mixed practice
+• Weak-topic improvement
 
-⚡ 9. WEAK TOPIC SYSTEM
-How the student should detect and fix weak chapters.
+📅 DAY 7 — 🏆 TEST + ANALYSIS
+• Weekly test/mock appropriate for {exam}
+• Test duration
+• Analyse wrong questions
+• Update weak-topic list
+• Revise important formulas/concepts
 
-🚨 10. LAST 30 DAYS
-Give a focused final-month strategy.
+⏰ DAILY STUDY STRUCTURE
+Create a realistic timetable that fits {roadmap["hours"]} hours/day, including short breaks.
 
-🔥 11. FIRST 7 DAYS
-Give EXACT Day 1, Day 2 ... Day 7 tasks.
+📝 PRACTICE TARGET
+Give realistic daily/weekly question targets appropriate for {exam}.
 
-🎯 12. TODAY'S MISSION
-Give today's tasks based on the student's level and available hours.
+🔄 REVISION SYSTEM
+Give a simple revision method the student can continue after this week.
 
-Rules:
-- Do not make an impossible topper-style timetable.
-- Do not assume the student can study 15+ hours.
-- Keep it practical.
+⚡ WEAK TOPIC RULE
+Explain how to identify and fix weak topics during the week.
+
+🏆 TOPPER RULES
+Give 4-6 short, practical rules specifically useful for {exam} preparation.
+
+🎯 END-OF-WEEK TARGET
+Give measurable results the student should achieve after 7 days.
+
+🔥 TOPPER MOTIVATION
+Give one strong, short motivational line mentioning {exam}.
+
+RULES:
 - Use simple Hinglish.
-- Use clear headings.
-- Make targets measurable.
-- If the exact exam date format is unclear, still make the best reasonable plan from the information supplied.
+- Keep it practical, motivating and exam-focused.
+- Give measurable targets wherever possible.
+- Do not assume 15+ hours of study.
+- Avoid unnecessary generic motivation.
+- Prioritise high-impact work based on the available time and preparation level.
 """
 
     async with TypingIndicator(context.bot, chat_id):
         answer = await gemini_text(prompt)
 
-        if not answer:
+        if not answer and client:
             for fallback_model in ["gemini-3.8-flash", "gemini-3.5-flash"]:
                 if fallback_model == MODEL:
                     continue
@@ -1070,7 +1065,7 @@ Rules:
 
     if not answer:
         await update.message.reply_text(
-            "⚠️ Roadmap generate nahi ho paaya.\n\n"
+            "⚠️ Strategy generate nahi ho paayi.\n\n"
             "API/model response nahi mila. `/start` se dobara Topper Mode try karo."
         )
         return
@@ -1081,7 +1076,7 @@ Rules:
     await update.message.reply_text(answer)
 
     await update.message.reply_text(
-        "🚀 Roadmap ready! Ab kya karna hai?",
+        "🚀 7-Day Topper Strategy ready! Ab kya karna hai?",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔥 Today's Mission", callback_data="mission")],
             [InlineKeyboardButton("📚 Study Corner", callback_data="study")],
