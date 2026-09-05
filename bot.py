@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import logging
 from datetime import datetime, date
 
@@ -109,9 +110,68 @@ def menu_keyboard():
     ])
 
 
+def resolve_chat_id(update_or_message):
+    """
+    Some handlers receive a real Update object (has .effective_chat),
+    others receive a Message object directly (has .chat_id).
+    This works with either.
+    """
+    effective_chat = getattr(update_or_message, "effective_chat", None)
+    if effective_chat is not None:
+        return effective_chat.id
+    return update_or_message.chat_id
+
+
+class TypingIndicator:
+    """
+    Async context manager that keeps showing Telegram's
+    "bot is typing..." animation (the little animated dots/circle)
+    for as long as the `async with` block is running.
+
+    Telegram auto-expires a single typing action after ~5 seconds,
+    so this refreshes it every 4 seconds in the background until
+    the actual work (e.g. a Gemini call) finishes.
+    """
+
+    def __init__(self, bot, chat_id, action="typing"):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.action = action
+        self._task = None
+
+    async def _loop(self):
+        try:
+            while True:
+                try:
+                    await self.bot.send_chat_action(chat_id=self.chat_id, action=self.action)
+                except Exception:
+                    logger.debug("send_chat_action failed", exc_info=True)
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            pass
+
+    async def __aenter__(self):
+        self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        return False
+
+
 async def gemini_text(prompt):
     try:
-        response = client.models.generate_content(
+        # generate_content is a blocking/synchronous SDK call. Running it
+        # directly here would freeze the bot's event loop (no other user's
+        # message, poll, or button click gets processed) until it returns.
+        # asyncio.to_thread runs it in a background thread instead.
+        response = await asyncio.to_thread(
+            client.models.generate_content,
             model=MODEL,
             contents=prompt,
         )
@@ -204,7 +264,7 @@ async def solve_doubt(update, context):
 
     context.user_data["mode"] = None
 
-    await update.message.reply_text("🧠 Question samajh raha hoon...")
+    chat_id = resolve_chat_id(update)
 
     prompt = f"""
 You are an expert but friendly personal study tutor.
@@ -232,7 +292,8 @@ Rules:
 - Do not mention that you are an AI.
 """
 
-    answer = await gemini_text(prompt)
+    async with TypingIndicator(context.bot, chat_id):
+        answer = await gemini_text(prompt)
 
     if not answer:
         await update.message.reply_text(
@@ -255,29 +316,26 @@ Rules:
 # =========================================================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = resolve_chat_id(update)
     try:
-        await update.message.reply_text(
-            "📸 Photo received!\n\n"
-            "🔍 Question read kar raha hoon..."
-        )
+        # Photo upload feels natural with the "upload_photo" chat action.
+        async with TypingIndicator(context.bot, chat_id, action="upload_photo"):
+            photo = update.message.photo[-1]
 
-        # Highest resolution photo from Telegram.
-        photo = update.message.photo[-1]
+            telegram_file = await context.bot.get_file(photo.file_id)
+            image_bytes = await telegram_file.download_as_bytearray()
 
-        telegram_file = await context.bot.get_file(photo.file_id)
-        image_bytes = await telegram_file.download_as_bytearray()
+            if not image_bytes:
+                raise ValueError("Telegram returned an empty image.")
 
-        if not image_bytes:
-            raise ValueError("Telegram returned an empty image.")
+            # Use Gemini's native image Part instead of manually constructing
+            # a REST payload. This is more reliable with google-genai.
+            image_part = types.Part.from_bytes(
+                data=bytes(image_bytes),
+                mime_type="image/jpeg",
+            )
 
-        # Use Gemini's native image Part instead of manually constructing
-        # a REST payload. This is more reliable with google-genai.
-        image_part = types.Part.from_bytes(
-            data=bytes(image_bytes),
-            mime_type="image/jpeg",
-        )
-
-        prompt = """
+            prompt = """
 You are an expert visual study tutor.
 
 Look carefully at the attached image.
@@ -314,19 +372,32 @@ Format:
 [short exam tip]
 """
 
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[prompt, image_part],
-        )
+            # Blocking SDK call - run in a background thread so the bot
+            # keeps responding to other users/messages while this runs.
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=MODEL,
+                contents=[prompt, image_part],
+            )
 
-        if not response or not response.text:
+        # response.text can itself raise (e.g. if Gemini's safety filters
+        # blocked the image and there are no valid candidates), so this
+        # needs its own guard instead of relying on the outer except only.
+        try:
+            answer_text = response.text if response else None
+        except Exception:
+            logger.error("Gemini image response had no usable text", exc_info=True)
+            answer_text = None
+
+        if not answer_text:
             await update.message.reply_text(
                 "⚠️ Image se answer generate nahi ho paaya.\n"
+                "Ho sakta hai photo unclear ho ya filter ho gaya ho.\n"
                 "Please clear, straight photo bhejo."
             )
             return
 
-        await update.message.reply_text(response.text)
+        await update.message.reply_text(answer_text)
 
         await update.message.reply_text(
             "📸 Another question?",
@@ -387,7 +458,7 @@ async def study_topic_received(update, context):
     )
 
 
-def generate_practice_question(topic, difficulty):
+async def generate_practice_question(topic, difficulty):
     prompt = f"""
 Create ONE high-quality practice question for a student.
 
@@ -412,19 +483,19 @@ Requirements:
 - Do not use markdown outside JSON.
 """
 
-    result = gemini_text(prompt)
+    # NOTE: gemini_text is async - it must be awaited, otherwise this
+    # would try to JSON-parse a coroutine object instead of real text.
+    result = await gemini_text(prompt)
     return parse_json_response(result)
 
 
 async def send_practice_question(update, context):
     topic = context.user_data.get("study_topic")
     difficulty = context.user_data.get("difficulty")
+    chat_id = resolve_chat_id(update)
 
-    await update.message.reply_text(
-        f"🧠 Generating a {difficulty.lower()} question..."
-    )
-
-    question = generate_practice_question(topic, difficulty)
+    async with TypingIndicator(context.bot, chat_id):
+        question = await generate_practice_question(topic, difficulty)
 
     if not isinstance(question, dict):
         await update.message.reply_text(
@@ -477,7 +548,7 @@ async def check_practice_answer(update, context):
         await show_hint(update, context)
         return
 
-    await update.message.reply_text("🔎 Tumhara answer check kar raha hoon...")
+    chat_id = resolve_chat_id(update)
 
     prompt = f"""
 You are an exacting but friendly teacher checking a student's answer.
@@ -512,7 +583,8 @@ For numerical answers, allow reasonable equivalent forms/rounding.
 Use simple Hinglish.
 """
 
-    result = gemini_text(prompt)
+    async with TypingIndicator(context.bot, chat_id):
+        result = await gemini_text(prompt)
 
     if not result:
         await update.message.reply_text(
@@ -547,7 +619,7 @@ Use simple Hinglish.
 # QUICK QUIZ
 # =========================================================
 
-def generate_quiz(topic):
+async def generate_quiz(topic):
     prompt = f"""
 Create exactly 5 high-quality MCQ questions on:
 {topic}
@@ -572,7 +644,9 @@ Rules:
 - No markdown.
 """
 
-    result = gemini_text(prompt)
+    # NOTE: gemini_text is async - must be awaited (was missing before,
+    # which meant quizzes never actually parsed correctly).
+    result = await gemini_text(prompt)
     quiz = parse_json_response(result)
 
     if not isinstance(quiz, list) or len(quiz) < 5:
@@ -607,12 +681,10 @@ async def start_quiz(update, context):
 
 async def receive_quiz_topic(update, context):
     topic = update.message.text.strip()
+    chat_id = resolve_chat_id(update)
 
-    await update.message.reply_text(
-        f"🎯 {topic} ka quiz prepare kar raha hoon..."
-    )
-
-    quiz = generate_quiz(topic)
+    async with TypingIndicator(context.bot, chat_id):
+        quiz = await generate_quiz(topic)
 
     if not quiz:
         await update.message.reply_text(
@@ -827,11 +899,7 @@ async def topper_router(update, context):
 
 async def create_roadmap(update, context):
     roadmap = context.user_data["roadmap"]
-
-    await update.message.reply_text(
-        "🔥 Details mil gaye!\n\n"
-        "Ab actual day-wise + phase-wise roadmap generate kar raha hoon..."
-    )
+    chat_id = resolve_chat_id(update)
 
     prompt = f"""
 You are an expert academic planner.
@@ -908,19 +976,24 @@ Rules:
 - If the exact exam date format is unclear, still make the best reasonable plan from the information supplied.
 """
 
-    answer = await gemini_text(prompt)
+    async with TypingIndicator(context.bot, chat_id):
+        answer = await gemini_text(prompt)
 
-    if not answer:
-        for fallback_model in ["gemini-3.8-flash", "gemini-3.5-flash"]:
-            if fallback_model == MODEL:
-                continue
-            try:
-                response = client.models.generate_content(model=fallback_model, contents=prompt)
-                if response and response.text:
-                    answer = response.text.strip()
-                    break
-            except Exception:
-                logger.error("Roadmap fallback failed", exc_info=True)
+        if not answer:
+            for fallback_model in ["gemini-3.8-flash", "gemini-3.5-flash"]:
+                if fallback_model == MODEL:
+                    continue
+                try:
+                    response = await asyncio.to_thread(
+                        client.models.generate_content,
+                        model=fallback_model,
+                        contents=prompt,
+                    )
+                    if response and response.text:
+                        answer = response.text.strip()
+                        break
+                except Exception:
+                    logger.error("Roadmap fallback failed", exc_info=True)
 
     if not answer:
         await update.message.reply_text(
@@ -954,9 +1027,7 @@ async def daily_mission(update, context):
         )
         return
 
-    await update.message.reply_text(
-        "🔥 Aaj ka mission roadmap ke according bana raha hoon..."
-    )
+    chat_id = resolve_chat_id(update)
 
     prompt = f"""
 Here is the student's personalised roadmap:
@@ -978,7 +1049,8 @@ Make it achievable in the student's available hours.
 Use simple Hinglish.
 """
 
-    answer = await gemini_text(prompt)
+    async with TypingIndicator(context.bot, chat_id):
+        answer = await gemini_text(prompt)
 
     if not answer:
         await update.message.reply_text(
