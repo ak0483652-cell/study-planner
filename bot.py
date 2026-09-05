@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 
 from dotenv import load_dotenv
 from google import genai
@@ -8,16 +9,16 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
-    PollAnswerHandler,
     MessageHandler,
     CallbackQueryHandler,
+    PollAnswerHandler,
     ContextTypes,
     filters,
 )
 
-# =========================================================
+# =========================
 # ENVIRONMENT
-# =========================================================
+# =========================
 
 load_dotenv()
 
@@ -30,138 +31,338 @@ if not BOT_TOKEN:
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY is missing")
 
-
-# =========================================================
+# =========================
 # GEMINI
-# =========================================================
+# =========================
 
 client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-
-# =========================================================
+# =========================
 # DATA
-# =========================================================
+# =========================
 
 progress = {}
-
 poll_data = {}
 
 
-# =========================================================
-# START
-# =========================================================
+def get_progress(user_id):
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if user_id not in progress:
+        progress[user_id] = {
+            "quizzes": 0,
+            "questions": 0,
+            "correct": 0,
+            "topics": {}
+        }
+
+    return progress[user_id]
+
+
+# =========================
+# MAIN MENU
+# =========================
+
+def main_menu():
 
     keyboard = [
+
+        [
+            InlineKeyboardButton(
+                "🤖 AI Doubt Solver",
+                callback_data="doubt"
+            ),
+            InlineKeyboardButton(
+                "🔍 Study Search",
+                callback_data="search"
+            )
+        ],
+
         [
             InlineKeyboardButton(
                 "📝 Generate AI Quiz",
-                callback_data="generate_quiz"
-            )
-        ],
-        [
+                callback_data="quiz"
+            ),
             InlineKeyboardButton(
                 "📊 My Progress",
                 callback_data="progress"
             )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🧠 Weak Topics",
+                callback_data="weak"
+            )
         ]
+
     ]
 
+    return InlineKeyboardMarkup(keyboard)
+
+
+# =========================
+# START
+# =========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    context.user_data.clear()
+
     await update.message.reply_text(
+
         "🎓 *STUDY HELP BOT*\n\n"
+
         "🤖 Your AI-powered study assistant\n\n"
-        "✨ Generate a quiz on ANY topic\n"
-        "📚 Practice with AI questions\n"
-        "🏆 Get your score\n"
-        "📊 Track your progress\n\n"
+
+        "✨ AI Doubt Solver\n"
+        "🔍 Study Search\n"
+        "📝 AI Quiz Generator\n"
+        "📊 Progress Tracking\n"
+        "🧠 Weak Topic Detector\n\n"
+
         "👇 Choose an option:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+
+        reply_markup=main_menu(),
+
         parse_mode="Markdown"
     )
 
 
-# =========================================================
+# =========================
+# AI DOUBT
+# =========================
+
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    context.user_data["mode"] = "doubt"
+
+    await update.message.reply_text(
+
+        "🤖 *AI DOUBT SOLVER*\n\n"
+
+        "Apna question bhejo.\n\n"
+
+        "Example:\n"
+        "• Explain Newton's second law\n"
+        "• What is integration?\n"
+        "• Explain Krebs cycle\n\n"
+
+        "💡 Main simple language me explain karunga.",
+
+        parse_mode="Markdown"
+    )
+
+
+async def solve_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    question = update.message.text.strip()
+
+    await update.message.reply_text(
+        "🤖 Thinking..."
+    )
+
+    prompt = f"""
+
+You are an expert student tutor.
+
+Student question:
+
+{question}
+
+Answer in simple Hinglish.
+
+Rules:
+- Explain step by step.
+- Use simple language.
+- Give examples where useful.
+- For numerical questions show calculations.
+- Include important exam points.
+- Avoid unnecessary complicated words.
+
+"""
+
+    try:
+
+        response = await asyncio.to_thread(
+
+            client.models.generate_content,
+
+            model="gemini-3.6-flash",
+
+            contents=prompt
+        )
+
+        answer = response.text.strip()
+
+        await update.message.reply_text(
+
+            "🤖 *AI EXPLANATION*\n\n"
+            + answer,
+
+            parse_mode="Markdown",
+
+            reply_markup=main_menu()
+        )
+
+        context.user_data["mode"] = None
+
+    except Exception as e:
+
+        print("DOUBT ERROR:", e)
+
+        await update.message.reply_text(
+            "❌ AI answer generate nahi hua. Dobara try karo."
+        )
+
+
+# =========================
+# SEARCH
+# =========================
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    context.user_data["mode"] = "search"
+
+    await update.message.reply_text(
+
+        "🔍 *STUDY SEARCH*\n\n"
+
+        "Jo topic search karna hai bhejo.\n\n"
+
+        "Example:\n"
+        "• Photosynthesis\n"
+        "• Thermodynamics\n"
+        "• Probability\n"
+        "• Semiconductor",
+
+        parse_mode="Markdown"
+    )
+
+
+async def study_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.message.text.strip()
+
+    await update.message.reply_text(
+        "🔍 Searching..."
+    )
+
+    prompt = f"""
+
+You are an educational study assistant.
+
+Topic:
+
+{query}
+
+Give a useful student-friendly study explanation.
+
+Include:
+
+1. Definition
+2. Main concepts
+3. Important points
+4. Formulas/facts if applicable
+5. Simple example
+6. Exam-important points
+
+Keep the answer clear and concise.
+
+"""
+
+    try:
+
+        response = await asyncio.to_thread(
+
+            client.models.generate_content,
+
+            model="gemini-3.6-flash",
+
+            contents=prompt
+        )
+
+        answer = response.text.strip()
+
+        await update.message.reply_text(
+
+            "🔍 *STUDY RESULT*\n\n"
+            + answer,
+
+            parse_mode="Markdown",
+
+            reply_markup=main_menu()
+        )
+
+        context.user_data["mode"] = None
+
+    except Exception as e:
+
+        print("SEARCH ERROR:", e)
+
+        await update.message.reply_text(
+            "❌ Search result generate nahi hua."
+        )
+
+
+# =========================
 # QUIZ COMMAND
-# =========================================================
+# =========================
 
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["waiting_for_topic"] = True
 
     await update.message.reply_text(
-        "🤖 *AI QUIZ GENERATOR*\n\n"
-        "✍️ Apna study topic type karo.\n\n"
+
+        "📝 *AI QUIZ GENERATOR*\n\n"
+
+        "Apna topic type karo.\n\n"
+
         "Examples:\n"
-        "• Thermodynamics\n"
-        "• Integration\n"
+        "• Physics\n"
         "• Organic Chemistry\n"
-        "• Human Digestive System\n"
-        "• Probability\n\n"
-        "👇 Ab apna topic bhejo:",
-        parse_mode="Markdown"
-    )
+        "• Integration\n"
+        "• Biology\n"
+        "• Thermodynamics\n\n"
 
-
-# =========================================================
-# GENERATE QUIZ BUTTON
-# =========================================================
-
-async def generate_quiz_button(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    context.user_data["waiting_for_topic"] = True
-
-    await query.message.reply_text(
-        "🤖 *AI QUIZ GENERATOR*\n\n"
-        "✍️ Apna study topic type karo.\n\n"
-        "Example:\n"
-        "`Newton's Laws`\n"
-        "`Electrostatics`\n"
-        "`Chemical Bonding`\n"
-        "`Cell Biology`\n\n"
         "👇 Topic bhejo:",
+
         parse_mode="Markdown"
     )
 
 
-# =========================================================
-# GEMINI QUIZ GENERATOR
-# =========================================================
+# =========================
+# GENERATE QUIZ
+# =========================
 
 def generate_quiz(topic):
 
     prompt = f"""
+
 You are an expert educational quiz generator.
 
-Create exactly 5 multiple-choice questions about:
+Create exactly 5 MCQ questions about:
 
 TOPIC: {topic}
 
 Requirements:
 
-- Questions must be factually correct.
-- Mix easy, medium and hard questions.
+- Exactly 5 questions.
 - Exactly 4 options per question.
-- Only one option is correct.
-- correct must be 0, 1, 2 or 3.
+- Only one correct answer.
+- Mix easy, medium and hard.
+- Questions must be factually correct.
+- Questions must be different.
 - Give a short explanation.
-- Do not repeat questions.
-- Keep questions suitable for students.
-- Stay strictly related to the requested topic.
+- Stay strictly related to the topic.
+- Suitable for students.
 - Return ONLY valid JSON.
-- Do not use markdown.
-- Do not use ```json.
+- No Markdown.
+- No ```json.
 
-Return exactly:
+Format:
 
 [
   {{
@@ -176,113 +377,114 @@ Return exactly:
     "explanation": "Short explanation"
   }}
 ]
+
 """
 
     response = client.models.generate_content(
+
         model="gemini-3.6-flash",
+
         contents=prompt
     )
 
     text = response.text.strip()
 
     if text.startswith("```"):
-        text = text.replace("```json", "")
-        text = text.replace("```", "")
+
+        text = text.replace(
+            "```json",
+            ""
+        )
+
+        text = text.replace(
+            "```",
+            ""
+        )
+
         text = text.strip()
 
-    quiz = json.loads(text)
+    quiz_data = json.loads(text)
 
-    if not isinstance(quiz, list):
+    if not isinstance(quiz_data, list):
         raise ValueError("Invalid quiz")
 
-    if len(quiz) != 5:
-        raise ValueError("Quiz must contain 5 questions")
+    if len(quiz_data) != 5:
+        raise ValueError("Quiz must have 5 questions")
 
-    for q in quiz:
+    for q in quiz_data:
 
-        if not all(
-            key in q
-            for key in [
-                "question",
-                "options",
-                "correct",
-                "explanation"
-            ]
-        ):
-            raise ValueError("Invalid question")
+        if "question" not in q:
+            raise ValueError("Missing question")
+
+        if "options" not in q:
+            raise ValueError("Missing options")
+
+        if "correct" not in q:
+            raise ValueError("Missing correct answer")
+
+        if "explanation" not in q:
+            raise ValueError("Missing explanation")
 
         if len(q["options"]) != 4:
-            raise ValueError("Need exactly 4 options")
+            raise ValueError("Need 4 options")
 
         if int(q["correct"]) not in [0, 1, 2, 3]:
             raise ValueError("Invalid correct answer")
 
-    return quiz
+    return quiz_data
 
 
-# =========================================================
+# =========================
 # RECEIVE TOPIC
-# =========================================================
+# =========================
 
-async def receive_topic(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def receive_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if not context.user_data.get("waiting_for_topic"):
+    if not context.user_data.get(
+        "waiting_for_topic"
+    ):
         return
 
     topic = update.message.text.strip()
 
-    if len(topic) < 2:
-
-        await update.message.reply_text(
-            "❌ Proper topic likho bhai.\n\n"
-            "Example: Thermodynamics"
-        )
-
-        return
-
-    context.user_data["waiting_for_topic"] = False
+    context.user_data[
+        "waiting_for_topic"
+    ] = False
 
     await update.message.reply_text(
-        f"🤖 *AI Quiz generate ho raha hai...*\n\n"
-        f"📚 Topic: *{topic}*\n"
-        f"⏳ Please wait...",
+
+        f"🤖 Generating quiz for *{topic}*...",
+
         parse_mode="Markdown"
     )
 
     try:
 
-        questions = generate_quiz(topic)
+        quiz_data = await asyncio.to_thread(
 
-        context.user_data["quiz_questions"] = questions
-        context.user_data["quiz_index"] = 0
-        context.user_data["quiz_score"] = 0
-        context.user_data["quiz_topic"] = topic
+            generate_quiz,
+
+            topic
+        )
 
         user_id = update.effective_user.id
 
-        if user_id not in progress:
+        context.user_data["quiz"] = quiz_data
 
-            progress[user_id] = {
-                "quizzes": 0,
-                "questions": 0,
-                "correct": 0,
-                "topics": {}
-            }
+        context.user_data[
+            "quiz_topic"
+        ] = topic
 
-        progress[user_id]["quizzes"] += 1
+        context.user_data[
+            "quiz_index"
+        ] = 0
 
-        if topic not in progress[user_id]["topics"]:
+        context.user_data[
+            "quiz_score"
+        ] = 0
 
-            progress[user_id]["topics"][topic] = {
-                "questions": 0,
-                "correct": 0
-            }
-
-        await send_poll_question(
-            update.effective_chat.id,
+        await send_next_poll(
+            update,
             context
         )
 
@@ -291,23 +493,23 @@ async def receive_topic(
         print("QUIZ ERROR:", e)
 
         await update.message.reply_text(
-            "❌ Quiz generate nahi ho paaya.\n\n"
-            "Topic ko thoda specific karke try karo."
+
+            "❌ Quiz generate nahi hua.\n\n"
+            "Please topic dobara try karo."
         )
 
 
-# =========================================================
-# SEND TELEGRAM NATIVE QUIZ
-# =========================================================
+# =========================
+# SEND POLL
+# =========================
 
-async def send_poll_question(
-    chat_id,
-    context: ContextTypes.DEFAULT_TYPE
+async def send_next_poll(
+    update,
+    context
 ):
 
-    questions = context.user_data.get(
-        "quiz_questions",
-        []
+    quiz_data = context.user_data.get(
+        "quiz"
     )
 
     index = context.user_data.get(
@@ -315,59 +517,56 @@ async def send_poll_question(
         0
     )
 
-    if index >= len(questions):
+    if not quiz_data:
+
+        return
+
+    if index >= len(quiz_data):
 
         await finish_quiz(
-            chat_id,
+            update,
             context
         )
 
         return
 
-    q = questions[index]
+    question = quiz_data[index]
 
     message = await context.bot.send_poll(
 
-        chat_id=chat_id,
+        chat_id=update.effective_chat.id,
 
         question=(
-            f"📝 Q{index + 1}/{len(questions)}\n\n"
-            f"{q['question']}"
+            f"Q{index + 1}/5\n\n"
+            + question["question"]
         ),
 
-        options=q["options"],
+        options=question["options"],
 
         type="quiz",
 
         correct_option_id=int(
-            q["correct"]
+            question["correct"]
         ),
 
         is_anonymous=False
     )
 
-    poll_data[message.poll.id] = {
+    poll_data[
+        message.poll.id
+    ] = {
 
-        "chat_id": chat_id,
+        "user_id":
+            update.effective_user.id,
 
-        "correct": int(
-            q["correct"]
-        ),
-
-        "explanation": q["explanation"],
-
-        "topic": context.user_data.get(
-            "quiz_topic",
-            "Unknown"
-        ),
-
-        "question_index": index
+        "index":
+            index
     }
 
 
-# =========================================================
+# =========================
 # POLL ANSWER
-# =========================================================
+# =========================
 
 async def poll_answer(
     update: Update,
@@ -385,167 +584,211 @@ async def poll_answer(
 
     user_id = answer.user.id
 
-    if not answer.option_ids:
+    if user_id != data["user_id"]:
         return
 
-    selected = answer.option_ids[0]
+    index = data["index"]
 
-    correct = data["correct"]
+    quiz_data = context.user_data.get(
+        "quiz",
+        []
+    )
 
-    topic = data["topic"]
+    if index >= len(quiz_data):
+        return
 
-    if user_id not in progress:
+    question = quiz_data[index]
 
-        progress[user_id] = {
-            "quizzes": 0,
-            "questions": 0,
-            "correct": 0,
-            "topics": {}
-        }
+    correct = int(
+        question["correct"]
+    )
 
-    progress[user_id]["questions"] += 1
+    selected = (
 
-    if topic not in progress[user_id]["topics"]:
+        answer.option_ids[0]
 
-        progress[user_id]["topics"][topic] = {
-            "questions": 0,
-            "correct": 0
-        }
+        if answer.option_ids
 
-    progress[user_id]["topics"][topic]["questions"] += 1
+        else -1
+    )
 
+    is_correct = (
+        selected == correct
+    )
 
-    # =====================================================
-    # CORRECT
-    # =====================================================
+    if is_correct:
 
-    if selected == correct:
-
-        context.user_data["quiz_score"] = (
-            context.user_data.get(
-                "quiz_score",
-                0
-            ) + 1
-        )
-
-        progress[user_id]["correct"] += 1
-
-        progress[user_id]["topics"][topic]["correct"] += 1
+        context.user_data[
+            "quiz_score"
+        ] += 1
 
         await context.bot.send_message(
-            chat_id=data["chat_id"],
+
+            chat_id=user_id,
+
             text=(
+
                 "✅ *Correct!*\n\n"
-                f"💡 {data['explanation']}"
+
+                "💡 "
+                + question["explanation"]
             ),
+
             parse_mode="Markdown"
         )
-
-
-    # =====================================================
-    # WRONG
-    # =====================================================
 
     else:
 
         await context.bot.send_message(
-            chat_id=data["chat_id"],
+
+            chat_id=user_id,
+
             text=(
-                "❌ *Wrong!*\n\n"
-                f"💡 {data['explanation']}"
+
+                "❌ *Incorrect!*\n\n"
+
+                f"✅ Correct answer: "
+                f"*{question['options'][correct]}*\n\n"
+
+                f"💡 {question['explanation']}"
             ),
+
             parse_mode="Markdown"
         )
 
+    # Progress
 
-    # Next question
-
-    context.user_data["quiz_index"] = (
-        context.user_data.get(
-            "quiz_index",
-            0
-        ) + 1
+    user_progress = get_progress(
+        user_id
     )
 
-    del poll_data[poll_id]
+    user_progress[
+        "questions"
+    ] += 1
 
-    await send_poll_question(
-        data["chat_id"],
+    if is_correct:
+
+        user_progress[
+            "correct"
+        ] += 1
+
+    topic = context.user_data.get(
+        "quiz_topic",
+        "Unknown"
+    )
+
+    if topic not in user_progress[
+        "topics"
+    ]:
+
+        user_progress[
+            "topics"
+        ][topic] = {
+
+            "questions": 0,
+            "correct": 0
+        }
+
+    user_progress[
+        "topics"
+    ][topic]["questions"] += 1
+
+    if is_correct:
+
+        user_progress[
+            "topics"
+        ][topic]["correct"] += 1
+
+    context.user_data[
+        "quiz_index"
+    ] += 1
+
+    await asyncio.sleep(1)
+
+    await send_next_poll(
+        update,
         context
     )
 
 
-# =========================================================
+# =========================
 # FINISH QUIZ
-# =========================================================
+# =========================
 
 async def finish_quiz(
-    chat_id,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
+
+    user_id = update.effective_user.id
 
     score = context.user_data.get(
         "quiz_score",
         0
     )
 
-    questions = context.user_data.get(
-        "quiz_questions",
-        []
-    )
-
     topic = context.user_data.get(
         "quiz_topic",
-        "General"
+        "Unknown"
     )
 
-    total = len(questions)
+    user_progress = get_progress(
+        user_id
+    )
 
-    if total == 0:
-        return
+    user_progress[
+        "quizzes"
+    ] += 1
 
-    percentage = (
-        score / total
-    ) * 100
+    percentage = score * 20
 
+    if percentage == 100:
 
-    if percentage >= 80:
+        emoji = "🏆"
+        result = "Perfect! Excellent work!"
 
-        result = "🔥 Excellent! Your preparation is strong."
+    elif percentage >= 80:
+
+        emoji = "🔥"
+        result = "Great performance!"
 
     elif percentage >= 60:
 
-        result = "👍 Good job! Keep practicing."
+        emoji = "👍"
+        result = "Good job! Keep practicing."
 
     else:
 
-        result = "📚 More practice needed. Keep going!"
-
+        emoji = "📚"
+        result = "Keep practicing. You will improve!"
 
     await context.bot.send_message(
 
-        chat_id=chat_id,
+        chat_id=user_id,
 
         text=(
-            "🏆 *AI QUIZ COMPLETED!*\n\n"
 
-            f"📚 Topic: *{topic}*\n"
-            f"🎯 Score: *{score}/{total}*\n"
-            f"📊 Accuracy: *{percentage:.0f}%*\n\n"
+            f"{emoji} *QUIZ COMPLETE*\n\n"
 
-            f"{result}\n\n"
+            f"📚 Topic: {topic}\n"
+            f"🎯 Score: {score}/5\n"
+            f"📈 Accuracy: {percentage}%\n\n"
 
-            "🤖 Use /quiz to start another quiz."
+            f"{result}"
         ),
+
+        reply_markup=main_menu(),
 
         parse_mode="Markdown"
     )
 
-
-    # Clear current quiz
+    context.user_data.pop(
+        "quiz",
+        None
+    )
 
     context.user_data.pop(
-        "quiz_questions",
+        "quiz_topic",
         None
     )
 
@@ -559,142 +802,387 @@ async def finish_quiz(
         None
     )
 
-    context.user_data.pop(
-        "quiz_topic",
-        None
-    )
 
-
-# =========================================================
+# =========================
 # PROGRESS
-# =========================================================
+# =========================
 
 async def progress_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     user_id = update.effective_user.id
 
-    data = progress.get(
-        user_id,
-        {
-            "quizzes": 0,
-            "questions": 0,
-            "correct": 0,
-            "topics": {}
-        }
+    data = get_progress(
+        user_id
     )
 
-    total_questions = data["questions"]
+    questions = data["questions"]
+
     correct = data["correct"]
 
     accuracy = (
-        correct / total_questions * 100
-        if total_questions
+
+        correct / questions * 100
+
+        if questions
+
         else 0
     )
 
-    message = (
+    text = (
+
         "📊 *YOUR PROGRESS*\n\n"
+
         f"📝 Quizzes: {data['quizzes']}\n"
-        f"❓ Questions: {total_questions}\n"
+        f"❓ Questions: {questions}\n"
         f"✅ Correct: {correct}\n"
-        f"🎯 Accuracy: {accuracy:.0f}%\n"
+        f"🎯 Accuracy: {accuracy:.0f}%"
     )
 
-    topics = data.get("topics", {})
-
-    if topics:
-
-        message += "\n📚 *TOPICS*\n\n"
-
-        for topic, stats in topics.items():
-
-            q = stats["questions"]
-            c = stats["correct"]
-
-            topic_accuracy = (
-                c / q * 100
-                if q
-                else 0
-            )
-
-            message += (
-                f"• {topic}: "
-                f"{topic_accuracy:.0f}%\n"
-            )
-
     await update.message.reply_text(
-        message,
+
+        text,
+
+        reply_markup=main_menu(),
+
         parse_mode="Markdown"
     )
 
 
-# =========================================================
+# =========================
+# WEAK TOPICS
+# =========================
+
+async def weak_topics(
+    update,
+    context
+):
+
+    user_id = update.effective_user.id
+
+    data = get_progress(
+        user_id
+    )
+
+    topics = data["topics"]
+
+    if not topics:
+
+        await update.message.reply_text(
+
+            "🧠 *WEAK TOPICS*\n\n"
+
+            "Abhi data nahi hai.\n"
+            "Pehle kuch quizzes attempt karo!",
+
+            reply_markup=main_menu(),
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    weak = []
+
+    for topic, stats in topics.items():
+
+        questions = stats["questions"]
+
+        correct = stats["correct"]
+
+        accuracy = (
+
+            correct / questions * 100
+
+            if questions
+
+            else 0
+        )
+
+        if accuracy < 70:
+
+            weak.append(
+                (topic, accuracy)
+            )
+
+    if not weak:
+
+        await update.message.reply_text(
+
+            "🔥 *NO MAJOR WEAK TOPIC*\n\n"
+
+            "Tumhari current performance 70%+ hai.",
+
+            reply_markup=main_menu(),
+
+            parse_mode="Markdown"
+        )
+
+        return
+
+    weak.sort(
+        key=lambda x: x[1]
+    )
+
+    text = "🧠 *YOUR WEAK TOPICS*\n\n"
+
+    for topic, accuracy in weak:
+
+        text += (
+
+            f"🔴 *{topic}*\n"
+            f"Accuracy: {accuracy:.0f}%\n\n"
+        )
+
+    text += (
+        "💡 In topics ko revise karo "
+        "aur dobara quiz attempt karo."
+    )
+
+    await update.message.reply_text(
+
+        text,
+
+        reply_markup=main_menu(),
+
+        parse_mode="Markdown"
+    )
+
+
+# =========================
 # BUTTON HANDLER
-# =========================================================
+# =========================
 
 async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     query = update.callback_query
 
     await query.answer()
 
-    if query.data == "generate_quiz":
+    # AI DOUBT
 
-        context.user_data["waiting_for_topic"] = True
+    if query.data == "doubt":
+
+        context.user_data["mode"] = "doubt"
 
         await query.message.reply_text(
-            "🤖 *AI QUIZ GENERATOR*\n\n"
-            "✍️ Apna topic type karo.\n\n"
-            "Example:\n"
-            "`Electrostatics`\n"
-            "`Integration`\n"
-            "`Organic Chemistry`\n\n"
-            "👇 Topic bhejo:",
+
+            "🤖 *AI DOUBT SOLVER*\n\n"
+            "Apna question bhejo:",
+
             parse_mode="Markdown"
         )
 
+    # SEARCH
+
+    elif query.data == "search":
+
+        context.user_data["mode"] = "search"
+
+        await query.message.reply_text(
+
+            "🔍 *STUDY SEARCH*\n\n"
+            "Apna topic bhejo:",
+
+            parse_mode="Markdown"
+        )
+
+    # QUIZ
+
+    elif query.data == "quiz":
+
+        context.user_data[
+            "waiting_for_topic"
+        ] = True
+
+        await query.message.reply_text(
+
+            "📝 *AI QUIZ GENERATOR*\n\n"
+
+            "Apna topic bhejo.\n\n"
+
+            "Example:\n"
+            "`Electrostatics`",
+
+            parse_mode="Markdown"
+        )
+
+    # PROGRESS
 
     elif query.data == "progress":
 
         user_id = query.from_user.id
 
-        data = progress.get(
-            user_id,
-            {
-                "quizzes": 0,
-                "questions": 0,
-                "correct": 0
-            }
+        data = get_progress(
+            user_id
         )
 
         questions = data["questions"]
+
         correct = data["correct"]
 
         accuracy = (
+
             correct / questions * 100
+
             if questions
+
             else 0
         )
 
         await query.message.reply_text(
+
             "📊 *YOUR PROGRESS*\n\n"
+
             f"📝 Quizzes: {data['quizzes']}\n"
             f"❓ Questions: {questions}\n"
             f"✅ Correct: {correct}\n"
             f"🎯 Accuracy: {accuracy:.0f}%",
+
+            reply_markup=main_menu(),
+
+            parse_mode="Markdown"
+        )
+
+    # WEAK TOPICS
+
+    elif query.data == "weak":
+
+        user_id = query.from_user.id
+
+        data = get_progress(
+            user_id
+        )
+
+        topics = data["topics"]
+
+        if not topics:
+
+            await query.message.reply_text(
+
+                "🧠 Abhi weak topics detect "
+                "karne ke liye data nahi hai.",
+
+                reply_markup=main_menu()
+            )
+
+            return
+
+        weak = []
+
+        for topic, stats in topics.items():
+
+            questions = stats["questions"]
+
+            correct = stats["correct"]
+
+            accuracy = (
+
+                correct / questions * 100
+
+                if questions
+
+                else 0
+            )
+
+            if accuracy < 70:
+
+                weak.append(
+                    (topic, accuracy)
+                )
+
+        if not weak:
+
+            await query.message.reply_text(
+
+                "🔥 No major weak topic!\n\n"
+                "70%+ accuracy maintained.",
+
+                reply_markup=main_menu()
+            )
+
+            return
+
+        weak.sort(
+            key=lambda x: x[1]
+        )
+
+        text = "🧠 *WEAK TOPICS*\n\n"
+
+        for topic, accuracy in weak:
+
+            text += (
+
+                f"🔴 {topic} — "
+                f"{accuracy:.0f}%\n"
+            )
+
+        await query.message.reply_text(
+
+            text,
+
+            reply_markup=main_menu(),
+
             parse_mode="Markdown"
         )
 
 
-# =========================================================
+# =========================
+# TEXT ROUTER
+# =========================
+
+async def text_router(
+    update,
+    context
+):
+
+    if context.user_data.get(
+        "waiting_for_topic"
+    ):
+
+        await receive_topic(
+            update,
+            context
+        )
+
+        return
+
+    mode = context.user_data.get(
+        "mode"
+    )
+
+    if mode == "doubt":
+
+        await solve_doubt(
+            update,
+            context
+        )
+
+        return
+
+    if mode == "search":
+
+        await study_search(
+            update,
+            context
+        )
+
+        return
+
+    await update.message.reply_text(
+        "👇 Menu se option choose karo:",
+        reply_markup=main_menu()
+    )
+
+
+# =========================
 # MAIN
-# =========================================================
+# =========================
 
 def main():
 
@@ -716,6 +1204,20 @@ def main():
 
     app.add_handler(
         CommandHandler(
+            "ask",
+            ask_command
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "search",
+            search_command
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
             "quiz",
             quiz
         )
@@ -728,6 +1230,13 @@ def main():
         )
     )
 
+    app.add_handler(
+        CommandHandler(
+            "weak",
+            weak_topics
+        )
+    )
+
     # Buttons
 
     app.add_handler(
@@ -736,16 +1245,7 @@ def main():
         )
     )
 
-    # Student topic
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_topic
-        )
-    )
-
-    # Native Telegram polls
+    # Quiz polls
 
     app.add_handler(
         PollAnswerHandler(
@@ -753,9 +1253,18 @@ def main():
         )
     )
 
-    # =====================================================
+    # Text
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            text_router
+        )
+    )
+
+    # =========================
     # RENDER WEBHOOK
-    # =====================================================
+    # =========================
 
     port = int(
         os.environ.get(
@@ -768,6 +1277,10 @@ def main():
         "RENDER_EXTERNAL_URL"
     )
 
+    print(
+        "🚀 STUDY HELP BOT STARTING..."
+    )
+
     if render_url:
 
         webhook_url = (
@@ -775,34 +1288,29 @@ def main():
         )
 
         print(
-            "🌐 Running on Render Webhook"
-        )
-
-        print(
-            f"🔗 Webhook: {webhook_url}"
+            "🌐 Webhook:",
+            webhook_url
         )
 
         app.run_webhook(
+
             listen="0.0.0.0",
+
             port=port,
+
             url_path="telegram",
+
             webhook_url=webhook_url
         )
 
     else:
 
-        # Local computer testing
-
         print(
-            "💻 Running locally with polling"
+            "💻 Running locally..."
         )
 
         app.run_polling()
 
-
-# =========================================================
-# RUN
-# =========================================================
 
 if __name__ == "__main__":
     main()
