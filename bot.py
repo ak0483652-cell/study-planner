@@ -924,9 +924,7 @@ Rules:
 
     if not answer:
         await update.message.reply_text(
-            "⚠️ Roadmap generate nahi ho paaya.
-
-"
+            "⚠️ Roadmap generate nahi ho paaya.\n\n"
             "API/model response nahi mila. `/start` se dobara Topper Mode try karo."
         )
         return
