@@ -1422,11 +1422,27 @@ async def error_handler(update, context):
 
 
 # =========================================================
+# BOT PROFILE
+# =========================================================
+
+async def post_init(application):
+    # Telegram does not allow custom text in place of the live
+    # "typing..." status. This sets the bot's short description,
+    # which is the closest permanent profile-style display.
+    try:
+        await application.bot.set_my_short_description(
+            short_description="56,506 monthly users"
+        )
+    except Exception:
+        logger.warning("Could not set bot short description.", exc_info=True)
+
+
+# =========================================================
 # MAIN
 # =========================================================
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
 
