@@ -272,6 +272,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update.effective_user.id)
 
     await update.message.reply_text(
+        "👥 56,506 Monthly Users\n\n"
         "👋 Hey! Welcome to Study Help Bot 📚\n\n"
         "Tum yahan:\n"
         "💡 Doubts solve kar sakte ho\n"
