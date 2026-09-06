@@ -228,6 +228,61 @@ async def gemini_text(prompt):
 
 
 
+
+def format_study_text(text):
+    """Make AI maths/equation output Telegram-friendly and easy to read."""
+    if not text:
+        return text
+
+    import re
+
+    # Remove LaTeX math delimiters so students don't see raw \\( \\) / \\[ \\].
+    text = text.replace(r"\(", "").replace(r"\)", "")
+    text = text.replace(r"\[", "").replace(r"\]", "")
+
+    # Handle Greek/function powers before replacing individual commands.
+    text = re.sub(r"\\([A-Za-z]+)\^\{\\([A-Za-z]+)\}", r"\\1^\\2", text)
+
+    # Common LaTeX commands -> readable Unicode/plain text.
+    replacements = {
+        r"\rho": "ρ", r"\pi": "π", r"\gamma": "γ", r"\alpha": "α",
+        r"\beta": "β", r"\theta": "θ", r"\lambda": "λ", r"\mu": "μ",
+        r"\sigma": "σ", r"\Delta": "Δ", r"\nabla": "∇", r"\partial": "∂",
+        r"\infty": "∞", r"\cdot": "·", r"\times": "×", r"\pm": "±",
+        r"\sin": "sin", r"\cos": "cos", r"\tan": "tan",
+        r"\log": "log", r"\ln": "ln", r"\exp": "exp",
+        r"\leq": "≤", r"\geq": "≥", r"\neq": "≠", r"\approx": "≈",
+        r"\rightarrow": "→", r"\Rightarrow": "⇒", r"\left": "", r"\right": "",
+        r"\big": "", r"\Big": "", r"\,": " ", r"\;": " ",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    # \text{...} -> ...
+    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
+
+    # Simple fractions: \frac{a}{b} -> (a)/(b)
+    text = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1)/(\2)", text)
+
+    # Simple square roots: \sqrt{x} -> √(x)
+    text = re.sub(r"\\sqrt\{([^{}]+)\}", r"√(\1)", text)
+
+    # Common powers: x^{2}, x^2, etc.
+    superscripts = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+    def power_repl(match):
+        value = match.group(1)
+        return "".join(ch.translate(superscripts) for ch in value)
+
+    text = re.sub(r"\^\{([^{}]+)\}", lambda m: power_repl(m), text)
+    text = re.sub(r"\^([0-9]+)", lambda m: power_repl(m), text)
+
+    # Clean leftover formatting commands/backslashes that commonly appear.
+    text = re.sub(r"\\([A-Za-z]+)", r"\1", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
 def parse_json_response(text):
     if not text:
         return None
@@ -329,13 +384,19 @@ Give:
 
 Rules:
 - Do not skip important calculation steps.
-- For Maths show the working.
-- For Physics show formula, substitution and units.
-- For Chemistry show relevant equations/reactions.
+- For Maths show the working clearly, one step per line.
+- For Physics show formula → values → substitution → calculation → unit → final result.
+- For Chemistry show relevant equations/reactions clearly.
 - For theory subjects use simple examples.
 - If the question has multiple parts, answer every part.
 - Do not invent missing information.
 - Do not mention that you are an AI.
+- IMPORTANT: Never use LaTeX delimiters such as \\( \\), \\[ \\], $$, or raw LaTeX formatting.
+- Write equations in clean student-friendly plain text/Unicode. Example: x² + 5x + 6 = 0.
+- Write fractions like (a)/(b), square roots like √(x), multiplication as × or ·.
+- Put long equations on separate lines.
+- Use blank lines between major steps so the answer is easy to read on Telegram.
+- Prefer simple headings and numbered steps over dense paragraphs.
 """
 
     async with TypingIndicator(context.bot, chat_id):
@@ -347,6 +408,7 @@ Rules:
         )
         return
 
+    answer = format_study_text(answer)
     await update.message.reply_text(answer)
     await update.message.reply_text(
         "Aur doubt hai? 👇",
@@ -515,6 +577,10 @@ Requirements:
 - Difficulty must genuinely match {difficulty}.
 - The official solution must actually solve the exact question.
 - For numerical questions, verify the arithmetic.
+- Make question, answer and solution easy to read on Telegram.
+- Do NOT use LaTeX delimiters such as \\( \\), \\[ \\], $$, or raw LaTeX commands.
+- Use Unicode/plain maths: x², √x, ×, ÷, ≤, ≥, π etc.
+- Put each important calculation on a separate line.
 - Do not use markdown outside JSON.
 """
 
@@ -548,10 +614,11 @@ async def send_practice_question(update, context):
     context.user_data["current_question"] = question
     context.user_data["mode"] = "study_answer"
 
+    display_question = format_study_text(str(question['question']))
     await update.reply_text(
         f"{'🟢 EASY' if difficulty == 'Easy' else '🔴 HARD'} QUESTION\n\n"
         f"📚 {topic}\n\n"
-        f"{question['question']}\n\n"
+        f"{display_question}\n\n"
         "✍️ Apna answer bhejo.\n"
         "💡 Hint ke liye `hint` likho."
     )
@@ -565,7 +632,7 @@ async def show_hint(update, context):
         return
 
     await update.message.reply_text(
-        "💡 HINT\n\n" + str(question["hint"])
+        "💡 HINT\n\n" + format_study_text(str(question["hint"]))
     )
 
 
@@ -616,6 +683,7 @@ Give:
 Do not blindly mark it correct.
 For numerical answers, allow reasonable equivalent forms/rounding.
 Use simple Hinglish.
+IMPORTANT: Never use LaTeX delimiters or raw LaTeX. Write equations in plain text/Unicode, one step per line, with clear spacing.
 """
 
     async with TypingIndicator(context.bot, chat_id):
@@ -638,6 +706,7 @@ Use simple Hinglish.
     )
     topic_stats["total"] += 1
 
+    result = format_study_text(result)
     await update.message.reply_text(result)
 
     await update.message.reply_text(
